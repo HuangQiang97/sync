@@ -20,4 +20,4 @@ git add --all
 git commit -m "%timestamp%"
 
 :: 推送到远程仓库
-git push origin main
+git push
