@@ -2,18 +2,18 @@
 setlocal enabledelayedexpansion
 
 REM 获取当前日期时间，并格式化为 "yyyymmdd-hhmmss"
-for /f "tokens=1-3 delims=-/. " %%a in ('echo %date%') do (
-    set day=%%a
-    set month=%%b
+for /f "tokens=1-3 delims=/- " %%a in ('echo %date%') do (
     set year=%%c
+    set month=%%a
+    set day=%%b
 )
 
-REM 检查系统日期格式，确保年份在前
+REM 如果年份在前面，调整解析顺序
 if !year! LSS 100 (
     set temp=!year!
-    set year=!day!
-    set day=!month!
-    set month=!temp!
+    set year=!month!
+    set month=!day!
+    set day=!temp!
 )
 
 for /f "tokens=1-2 delims=: " %%a in ('time /t') do (
