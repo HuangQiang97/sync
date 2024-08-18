@@ -29,6 +29,39 @@ https://myblackboxrecorder.com/sentinel-reading-4/
 
 https://cloud.tencent.com/developer/article/1855600
 
+```
+@GetMapping("/myEndpoint")
+@SentinelResource(value = "myEndpointResource", blockHandler = "handleLimit")
+public String myEndpoint() {
+    return "This is my endpoint";
+}
+
+// 限流后的处理方法
+public String handleLimit(BlockException ex) {
+    return "Request has been limited";
+}
+
+@Component
+public class SentinelRulesConfiguration {
+    /**
+     * You can configure sentinel rules by referring.
+     * https://sca.aliyun.com/docs/2023/user-guide/sentinel/advanced-guide/#%E6%9B%B4%E5%A4%9A%E9%85%8D%E7%BD%AE%E9%A1%B9
+     */
+    @PostConstruct
+    public void init() {
+
+        // 配置限流规则
+        FlowRule rule = new FlowRule();
+        rule.setResource("myEndpointResource");
+        rule.setGrade(RuleConstant.FLOW_GRADE_QPS);
+        rule.setCount(1); // QPS 限制为 5
+        FlowRuleManager.loadRules(Collections.singletonList(rule));
+
+    }
+}
+
+```
+
 ### 远程调用链路
 
 `Nacos`
