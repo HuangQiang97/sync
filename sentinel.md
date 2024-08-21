@@ -367,12 +367,21 @@ public class RateLimiterController implements TrafficShapingController {
 
 ### 令牌桶限流
 
-* `WarmUpController`实现了带预热的令牌桶发算法。它设定令牌生成间隔和令牌桶中剩余令牌数成反比，当令牌桶中堆积较多令牌时，证明当前系统QPS较小，需要增大生成令牌的时间间隔；当令牌桶中剩余令牌较少时，证明当前系统QPS较大，需要较少生成令牌的时间间隔。推过这种策略，当单位时间请求数组件增大时，令牌生成间隔不断减少，单位时间放行的请求将逐渐增多，直至到达设定的最大放行请求数。等价于给冷系统一个预热的时间，给出额外时间进行初始化的场景，避免流量突然增加时，大量请求直接获得令牌进入系统，瞬间把系统压垮。
-* <img src="./assets/1204119-20190908230555824-529025744.png" alt="img" style="zoom:70%;" />
-* 当桶内堆积令牌数大于tp时，进入预热阶段，预热开始时令牌生成间隔ci=fc/count，预热结束时令牌生成间隔si=1/count，预热时长wp ,预热阶段令牌生成间隔和堆积令牌数成正比。
-* 开启预热的阈值$tp=\frac{wp}{fc/count-1/count}=\frac{wp*count}{fc-1}$
-* 令牌桶内最大令牌数等于开启预热的阈值tp+预热期间生成的令牌数wp，由于预热期间令牌生成间隔从$fc/count$到$1/count$均匀变化，所以预热期间生成的令牌数$wp=wp*\frac{1}{(\frac{fc}{count}+\frac{1}{count})/2}$，所以$mp=tp+\frac{2*wp*count}{1+fc}$
-* 上图中支线的斜率$k=\frac{ci-si}{mp-tp}=\frac{cf-1}{cout*(mp-tp)}$
+* `WarmUpController`实现了带预热的令牌桶发算法。它设定令牌生成间隔和令牌桶中剩余令牌数成反比，当令牌桶中堆积较多令牌时，证明当前系统QPS较小，需要增大生成令牌的时间间隔；当令牌桶中剩余令牌较少时，证明当前系统QPS较大，需要减少生成令牌的时间间隔。
+
+* 推过这种策略，当单位时间请求数组件增大时，令牌生成间隔不断减少，单位时间放行的请求将逐渐增多，直至到达设定的最大放行请求数。等价于给冷系统一个预热的时间，给出额外时间进行初始化，避免流量突然增加时，大量请求直接获得令牌进入系统，瞬间把系统压垮。
+
+* 当桶内堆积令牌数大于`tps`时，进入预热阶段，预热开始时令牌生成间隔`ci=fc/count`，预热结束时令牌生成间隔`si=1/count`，预热时长`wp` ,预热阶段令牌生成间隔和堆积令牌数成正比。
+
+  <img src="./assets/1204119-20190908230555824-529025744.png" alt="img" style="zoom:70%;" />
+
+  
+
+* 开启预热的阈值定义为$tps=\frac{wp}{fc/count-1/count}=\frac{wp*count}{fc-1}$
+
+  令牌桶内最大令牌数`mps`=开启预热的阈值`tps`+预热期间生成的令牌数`wps`。由于预热期间令牌生成间隔从$fc/count$到$1/count$均匀变化，所以预热期间生成令牌的平均间隔为$(\frac{fc}{count}+\frac{1}{count})/2$，`wp`时间内生成的令牌数$wps=wp*\frac{1}{(\frac{fc}{count}+\frac{1}{count})/2}$。
+
+* 在进入预热阶段，令牌生成间隔与堆积令牌数曲线的斜率等于预热开始与终止时，令牌生成时间间隔之差除以预热开始与终止时令牌堆积数之差，$k=\frac{ci-si}{mps-tps}=\frac{cf-1}{cout*(mps-tps)}$，得到预热阶段令牌生成速率`qps`与当前堆积令牌数`ps`的关系$wcount=\frac{1}{(ps-tps)*k+1/count}$。
 
 ```java
 public class WarmUpController implements TrafficShapingController {
@@ -389,53 +398,84 @@ public class WarmUpController implements TrafficShapingController {
         // 斜率等于预热开始与终止令牌生成时间间隔只差处于预热开始与终止令牌堆积数
         slope = (coldFactor - 1.0) / count / (maxToken - warningToken);
     }
+}
+```
 
+* 当请求到来时，先通过`WarmUpController#coolDownTokens`计算当前令牌桶堆积令牌数，涉及计算最近一次生成令牌时间与当前时间之间生成的令牌数，当堆积令牌数超过预热阈值`tps`时，令牌生成速率为`count/fc`；当堆积令牌数未超过预热阈值`tps`时，令牌生成速率为`count`。
+
+```java
+public class WarmUpController implements TrafficShapingController {
+    private long coolDownTokens(long currentTime, long passQps) {
+        long oldValue = storedTokens.get();
+        long newValue = oldValue;
+        // 令牌堆积不严重，正常速率生成令牌
+        if (oldValue < warningToken) {
+            newValue = (long)(oldValue + (currentTime - lastFilledTime.get()) * count / 1000);
+        } else if (oldValue > warningToken) {
+            if (passQps < (int)count / coldFactor) {
+                // 令牌堆积严重，降低生成令牌速率
+                newValue = (long)(oldValue + (currentTime - lastFilledTime.get()) * count / 1000);
+            }
+        }
+        return Math.min(newValue, maxToken);
+    }
+}
+```
+
+* 判断请求是否被拦截由`WarmUpController#canPass`实现。先判断堆积令牌数是否超过预热阈值`tps`，如果未超过阈值，说明令牌堆积较少，正常生成令牌，系统QPS维持预定值`count`；令牌超过阈值，说明消耗较慢，需要减少令牌生成速率，当前QPS降低为$wcount=\frac{1}{(ps-tps)*k+1/count}$。
+
+```java
+public class WarmUpController implements TrafficShapingController {
     public boolean canPass(Node node, int acquireCount, boolean prioritized) {
         long passQps = (long) node.passQps();
-
         long previousQps = (long) node.previousPassQps();
+        // 更新最近一次生成令牌时间与当前时间之间推挤的令牌数
         syncToken(previousQps);
-
-        // 开始计算它的斜率
-        // 如果进入了警戒线，开始调整他的qps
         long restToken = storedTokens.get();
         if (restToken >= warningToken) {
+            // 令牌堆积炒超过阈值，说明消耗较慢，需要减少令牌生成速率，降低放行QPS
             long aboveToken = restToken - warningToken;
-            // 消耗的速度要比warning快，但是要比慢
-            // current interval = restToken*slope+1/count
+            // 当前令牌生成间隔restToken*slope+1/count
             double warningQps = Math.nextUp(1.0 / (aboveToken * slope + 1.0 / count));
+            // 令牌数足够则放行，否则阻止
             if (passQps + acquireCount <= warningQps) {
                 return true;
             }
         } else {
+            // 令牌堆积较少，正常生成令牌，系统QPS维持预定值
             if (passQps + acquireCount <= count) {
                 return true;
             }
         }
-
         return false;
     }
-    protected void syncToken(long passQps) {
-        long currentTime = TimeUtil.currentTimeMillis();
-        currentTime = currentTime - currentTime % 1000;
-        long oldLastFillTime = lastFilledTime.get();
-        if (currentTime <= oldLastFillTime) {
-            return;
-        }
-
-        long oldValue = storedTokens.get();
-        long newValue = coolDownTokens(currentTime, passQps);
-
-        if (storedTokens.compareAndSet(oldValue, newValue)) {
-            long currentValue = storedTokens.addAndGet(0 - passQps);
-            if (currentValue < 0) {
-                storedTokens.set(0L);
-            }
-            lastFilledTime.set(currentTime);
-        }
-
-    }
 }
-
 ```
 
+## 统计实现
+
+* 请求统计由`StatisticSlot`实现，在拦截责任链中单请求通过`AuthoritySlot`,`SystemSlot`,`FlowSlot`,`DegradeSlot`拦截后，则认为请求被放行，更新当前时间`MetricBucket`中的放行请求数和正在处理请求数；如果请求被拦截，更新`MetricBucket`中被拦截请求数。
+
+  数据的更新最终落实下`MetricBucket#counters`数组中，根据要更新数据的类型，找到该指标的下标并更新数值。
+
+```java
+public class StatisticSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
+    @Override
+    public void entry(Context context, ResourceWrapper resourceWrapper, DefaultNode node, int count,boolean prioritized, Object... args) throws Throwable {
+        try {
+            // 执行`AuthoritySlot`,`SystemSlot`,`FlowSlot`,`DegradeSlot`拦截节点拦截
+            fireEntry(context, resourceWrapper, node, count, prioritized, args);
+            // 如果通过全部拦截节点，更新放行请求数和正在处理请求数，如果请求被拦截，将抛出异常不会执行下列更新
+            node.increaseThreadNum();
+            node.addPassRequest(count);
+       catch (BlockException e) {
+           // 如果请求被拦截，将抛出异常
+            // 更新被拦截请求数
+            node.increaseBlockQps(count);
+            throw e;
+        } catch (Throwable e) {
+            throw e;
+        }
+    }
+}
+```
