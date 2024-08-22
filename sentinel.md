@@ -14,9 +14,18 @@ public class StatisticNode implements Node {
 }
 ```
 
-* 统计数组`rollingCounterInMinute`本是上是一个存储`MetricBucket`的数组，`MetricBucket`用于统计一个统计基本单位，即`1000ms`内请求的汇总数据。其内部持有一个长度为6的数组，分别表示统计基本单位内放行请求数、阻塞请求数、异常请求数、成功请求数、请求响应时间和通过未来配额的请求数。
+* 滑动窗口`ArrayMetric`最终指向`WindowWrap<MetricBucket>`数组。`WindowWrap<MetricBucket>`是对`MetricBucket`的包装，`MetricBucket`用于统计一个统计基本单位，即`1000ms`内请求的汇总数据,其内部持有一个长度为6的数组，分别表示统计基本单位内放行请求数、阻塞请求数、异常请求数、成功请求数、请求响应时间和通过未来配额的请求数。`WindowWrap<MetricBucket>`还额外添加`Bucket`开始时间及`Bucket`的长度。
 
 ```java
+public class WindowWrap<T> {
+    // bucket长度
+    private final long windowLengthInMs;
+    // 开始时间
+    private long windowStart;
+    // Bucket本身
+    private T value;
+}
+
 public class MetricBucket {
 	
     private final LongAdder[] counters;
@@ -175,7 +184,7 @@ public class CtSph implements Sph {
         }
 		// 查找当前资源对应的责任链，如果责任链不存在需要初始化
         ProcessorSlot<Object> chain = lookProcessChain(resourceWrapper);
-        // 构建拦截责任链自行入口
+        // 构建拦截责任链入口
         Entry e = new CtEntry(resourceWrapper, chain, context);
         // 执行责任链调用
         chain.entry(context, resourceWrapper, null, count, prioritized, args);
@@ -183,10 +192,29 @@ public class CtSph implements Sph {
     }
 ```
 
-* 初始时上下文由`ContextUtil#trueEnter`完成。该方法主要是先通过双检查机制保证在多个请求同时访问同一个资源，同时触发初始化上下文时，上下文只会被初始化一次；再构建名称为`sentinel_default_context`的入口节点，作为责任链的入口，最后生成上下文，并传入生成的入口节点node及名称，再将上下文加入`ThreadLocal`缓存。
+* `Context`是线程持有的，维持着入口节点、本次调用链路的当前节点、调用来源信息，利用``ThreadLocal`与当前线程绑定，`Context` 将贯穿一次调用链路中的所有 `Entry`，当任务执行完毕后被清除。
+
+```java
+public class Context {
+    // Context name.
+    private final String name;
+    // 入口节点
+    private DefaultNode entranceNode;
+    // 正在处理entry
+    private Entry curEntry;
+	// 当前请求来源
+    private String origin = "";
+}
+```
+
+* 上下文初始时上下文由`ContextUtil#trueEnter`完成，将资源调用的节点和Entry信息放入上下文，
+
+    该方法主要是先通过双检查机制保证在多个请求同时访问同一个资源，同时触发初始化上下文时，上下文只会被初始化一次；再构建名称为`sentinel_default_context`的入口节点，作为责任链的入口，最后生成上下文，并传入生成的入口节点node及名称，再将上下文加入`ThreadLocal`缓存，。
 
 ```java
 public class ContextUtil {
+    // 上下文通过ThreadLocal与当前线程绑定
+    private static ThreadLocal<Context> contextHolder = new ThreadLocal<>();
     protected static Context trueEnter(String name, String origin) {
         // 双检查判断上下午是否未被生成，保证上下文只会被初始化一次
         Map<String, DefaultNode> localCacheNameMap = contextNameNodeMap;
@@ -220,7 +248,7 @@ public class ContextUtil {
 }
 ```
 
-* 查找责任链由`CtSph#lookProcessChain`完成，该过程同样使用双检查机制保证在多个请求同时访问同一个资源，同时触发初始化责任链时，责任链只会被初始化一次。该方法主要完成责任链的实例化，并添加`NodeSelector`,`SlotCluster`,`BuilderSlot`,`LogSlot`,`StatisticSlot`,`AuthoritySlot`,`SystemSlot`,`FlowSlot`,`DegradeSlot`这8个预加载的责任节点。
+* 查找责任链由`CtSph#lookProcessChain`完成，该过程同样使用双检查机制保证在多个请求同时访问同一个资源，同时触发初始化责任链时，责任链只会被初始化一次。该方法主要完成责任链的实例化，并添加`NodeSelector`,`SlotCluster`,`BuilderSlot`,`LogSlot`,`StatisticSlot`,`AuthoritySlot`,`SystemSlot`,`FlowSlot`,`DegradeSlot`这8个预加载的责任节点，最后以被保护资源为`key`，责任链为`value`加入缓存，一个资源对应一个拦截责任链。
 
 ```java
 public class CtSph implements Sph {
@@ -248,9 +276,39 @@ public class CtSph implements Sph {
 
 <img src="./assets/1204119-20190903103538558-1257513670.png" alt="img" style="zoom: 33%;" />
 
+* 构建的责任链存入`CtEntry`， `CtEntry`表示是否通过拦截责任链的凭证，如果能通过，则说明可以访问被保护的后方服务，否则抛出异常，同时保存本次请的一些基本信息，如要访问的资源、需要执行的责任链、上下文、请求到来时间、请求返回时间、请求来源。
+
+```java
+class CtEntry extends Entry {
+    // 保护资源的责任链
+    protected ProcessorSlot<Object> chain;
+    // 上下文
+    protected Context context;
+    // 请求到来时间
+    private final long createTimestamp;
+    // 请求返回时间
+    private long completeTimestamp;
+    // 请求来源
+    private Node originNode;
+    // 要访问的资源
+    protected final ResourceWrapper resourceWrapper;
+}
+```
+
+* `Node`继承自`StatisticNode`，是对资源的统计包装。内部持有当前资源的请求情况，同时可以通过入口节点的`childList`，追溯资源的调用情况。
+
+```java
+public class DefaultNode extends StatisticNode {
+	// 资源
+    private ResourceWrapper id;
+	// 子节点
+    private volatile Set<Node> childList = new HashSet<>();
+}
+```
+
 ### 责任链执行
 
-* 所有的责任链节点均继承自`AbstractLinkedProcessorSlot`，在每个拦截节点的`entry`方法先执行自身拦截逻辑，再 通过`fireEntry`作为执行下一个责任链节点的入口，之后流转到`transformEntry`执行类型转换，调用下一个节点`entry`方法执行。循环往复直至完成所有节点执行。
+* 所有的责任链节点均继承自`AbstractLinkedProcessorSlot`，在每个拦截节点的`entry`方法先执行自身拦截逻辑，再通过`fireEntry`作为执行下一个责任链节点的入口，之后流转到`transformEntry`执行类型转换，调用下一个节点`entry`方法执行。循环往复直至完成所有节点执行。最后当请求完成时，通过`Entry#exit`执行各个拦截节点的`exit`方法，用作统计请求执行状况。
 
 ```java
 public abstract class AbstractLinkedProcessorSlot<T> implements ProcessorSlot<T> {
@@ -274,12 +332,16 @@ public abstract class AbstractLinkedProcessorSlot<T> implements ProcessorSlot<T>
         doCheck();
         fireEntry();
     }
+    // 退出当前拦截节点时执行，用于获取执行结果更新统计数据
+    void exit(Context context, ResourceWrapper resourceWrapper, int count, Object... args){
+        doCallback();
+    }
 }
 ```
 
 ## 限流实现
 
-* 请求QPS限流通过`FlowSlot`实现，有漏桶限流算法、令牌桶限流算法等限流算法可供选择。`FlowSlot#entry`调用`FlowRuleChecker#checkFlow`方法，获取目标资源对应的全部规则，并依次完成规则校验，只有全部限流规则都通过，才能进入下一个责任链节点的处理。
+* 请求QPS限流通过`FlowSlot`实现，有漏桶限流算法、令牌桶限流算法等限流算法可供选择。`FlowSlot#entry`调用`FlowRuleChecker#checkFlow`方法，获取目标资源对应的全部规则，并依次完成规则校验，只有全部限流规则都通过，才能进入下一个责任链节点的处理，如果被限流，则抛出限流异常`FlowException`。
 
 ```java
 public class FlowRuleChecker {
@@ -290,6 +352,7 @@ public class FlowRuleChecker {
             for (FlowRule rule : rules) {
                 // 根据规则获得对应的规则校验器，判断当前请求是否能够通过
                 if (!canPassCheck(rule, context, node, count, prioritized)) {
+                    // 如果被限流，则抛出限流异常FlowException
                     throw new FlowException(rule.getLimitApp(), rule);
                 }
             }
@@ -306,7 +369,7 @@ public class FlowRuleChecker {
 
     假设系统最近一次放行请求的时间为$t_p$，每秒钟能处理$q$个请求。当有$n_r$个请求到达时，首先计算处理完这$n_r$个请求需要的时间$\Delta t=n_r\times\frac{1}{q}$，得到放行请求的时刻$t_e=t_p+\Delta t$，四个时间可以用下图表示
 
-    <img src="./assets/image-20240820202806915.png" alt="image-20240820202806915" style="zoom:67%;" />
+    <img src="./assets/image-20240820202806915.png" alt="image-20240820202806915" style="zoom: 33%;" />
 
     比较期望放行时刻$t_e$与当前时刻$t_n$大小
 
@@ -454,7 +517,7 @@ public class WarmUpController implements TrafficShapingController {
 
 ## 统计实现
 
-* 请求统计由`StatisticSlot`实现，在拦截责任链中单请求通过`AuthoritySlot`,`SystemSlot`,`FlowSlot`,`DegradeSlot`拦截后，则认为请求被放行，更新当前时间`MetricBucket`中的放行请求数和正在处理请求数；如果请求被拦截，更新`MetricBucket`中被拦截请求数。
+* 请求统计由`StatisticSlot`实现，在拦截责任链中单请求通过`AuthoritySlot`,`SystemSlot`,`FlowSlot`,`DegradeSlot`拦截后，则认为请求被放行，更新当前时间`MetricBucket`中的放行请求数和正在处理请求数。也就是先触发下一个链接节点的执行，拿到拦截过滤结果后，最后执行自身的统计逻辑；如果请求被拦截，更新`MetricBucket`中被拦截请求数。
 
   数据的更新最终落实下`MetricBucket#counters`数组中，根据要更新数据的类型，找到该指标的下标并更新数值。
 
@@ -479,3 +542,31 @@ public class StatisticSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
     }
 }
 ```
+
+* 通过计数、阻塞计数、异常计数为执行``StatisticSlot#entry`方法更新，成功计数及响应时间为执行`StatisticSlot#exit`方法更新。当请求执行完毕，通过`Entry#exit`执行节点的`StatisticSlot#exit`方法，用作根据请求执行情况，更新请求异常、响应时间等统计数据。
+
+```java
+public class StatisticSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
+    public void exit(Context context, ResourceWrapper resourceWrapper, int count, Object... args) {
+        Node node = context.getCurNode();
+        // 请求执行成功
+        if (context.getCurEntry().getBlockError() == null) {
+            // 将当前请求的响应时间加入统计值
+            long completeStatTime = TimeUtil.currentTimeMillis();
+            context.getCurEntry().setCompleteTimestamp(completeStatTime);
+            long rt = completeStatTime - context.getCurEntry().getCreateTimestamp();
+
+            Throwable error = context.getCurEntry().getError();
+
+            // Record response time and success count.
+            recordCompleteFor(node, count, rt, error);
+            recordCompleteFor(context.getCurEntry().getOriginNode(), count, rt, error);
+            if (resourceWrapper.getEntryType() == EntryType.IN) {
+                recordCompleteFor(Constants.ENTRY_NODE, count, rt, error);
+            }
+        }
+        fireExit(context, resourceWrapper, count, args);
+    }
+}
+```
+
