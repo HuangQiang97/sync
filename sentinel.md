@@ -1,20 +1,24 @@
+[toc]
+
 ## 数据统计
 
 ### 数据结构
 
 * `sentinel`使用滑动窗口方式统计一分钟内放行请求数、阻塞请求数、异常请求数、成功请求数和请求响应时间。
 
-* 数据统计由`StatisticNode`类完成，内部保有数据统计数组`rollingCounterInMinute`，数组统计的时间范围为`60*1000ms`，统计范围内均匀采样`60`次，以`1000ms`为统计基本单位。同时记录下最近一次更新数据的时间`lastFetchTime`作为时间范围的上界，`lastFetchTime-6000ms`作为时间范围的下界，通过上下界过滤出`rollingCounterInMinute`中有效的统计单位节点。
+* 数据统计由`StatisticNode`类完成，内部保有数据统计数组`rollingCounterInMinute`，数组统计的时间范围为`60*1000ms`，统计范围内均匀采样`60`次，以`1000ms`为统计基本单位。同时记录下最近一次更新数据的时间`lastFetchTime`作为时间范围的上界，`lastFetchTime-6000ms`作为时间范围的下界，通过上下界过滤出`rollingCounterInMinute`中有效的统计单位节点。`curThreadNum`记录正在处理的请求数。
 
 ```java
 public class StatisticNode implements Node {
 	// 数据统计的时间范围为60*1000ms，统计范围内均匀采样60次，以1000ms为统计基本单位
     private transient Metric rollingCounterInMinute = new ArrayMetric(60, 60 * 1000, false);
     private long lastFetchTime = -1;
+    // 正在处理的请求数
+    private LongAdder curThreadNum = new LongAdder();
 }
 ```
 
-* 滑动窗口`ArrayMetric`最终指向`WindowWrap<MetricBucket>`数组。`WindowWrap<MetricBucket>`是对`MetricBucket`的包装，`MetricBucket`用于统计一个统计基本单位，即`1000ms`内请求的汇总数据,其内部持有一个长度为6的数组，分别表示统计基本单位内放行请求数、阻塞请求数、异常请求数、成功请求数、请求响应时间和通过未来配额的请求数。`WindowWrap<MetricBucket>`还额外添加`Bucket`开始时间及`Bucket`的长度。
+* 滑动窗口`ArrayMetric`最终指向`WindowWrap<MetricBucket>`数组。`WindowWrap<MetricBucket>`是对`MetricBucket`的包装，`MetricBucket`用于统计一个统计基本单位，即`1000ms`内被保护资源的基础统计信息，其内部持有一个长度为6的数组，分别表示统计基本单位内放行请求数、阻塞请求数、异常请求数、成功请求数、请求响应时间和通过未来配额的请求数(请求触发限流，但由于请求的高优先级占用下一个时间窗口，最后被放行)。`WindowWrap<MetricBucket>`还额外添加`Bucket`开始时间及`Bucket`的长度。
 
 ```java
 public class WindowWrap<T> {
@@ -94,9 +98,11 @@ public class StatisticNode implements Node {
 ```
 
 * 更新当前时刻对应`bucket`有效期的任务由`ArrayMetric#details`调用`LeapArray#currentWindow`完成。先计算当前实际属于`bucket`的编号`new_bucket_no=time_millis/1000ms`，再通过对编号取余的方式定位到该`new_bucket`在数组中下标`idx=new_bucket_no%60`。根据下标处原有`old_bucket=array[idx]`可能存在三种可能：
-    * `old_bucket`为空，说明这是第一次访问`idx`所在`bucket`，需要初始化该`bucket`；
+    * `old_bucket`为空，说明这是第一次访问`idx`所在`bucket`，需要初始化该`bucket`，由于可能有多个线程同时尝试添加，因此使用乐观锁CAS保证线程安全。
     * `old_bucket`与`new_bucket`对应的起始时间相同，说明这是在`old_bucket`负责的时间范围内再次访问`idx`处数据，此时`old_bucket`生命周期已被更新，不用处理；
     * `old_bucket`的起始时间小于`new_bucket`的起始时间，说明`new_bucket_no=old_bucket_no+60*k`，虽然`old_bucket_no`和`new_bucket_no`都会定位到同一个下标，但是当前已经完成至少一轮数组扫描，`old_bucket`已经过期，需要更新`bucket`起始时间，并将统计值置零。
+    
+    更新当前bucket方法可能会存在多个线程同时更新同一个bucket，通过`CAS`以及加锁方式保证线程安全，同时如果竞争线程资源失败使用`Thread.yield`主动放弃CPU时间片，通过`while`循环，自旋方式重试更新操作。
 
 ```java
 public abstract class LeapArray<T> {
@@ -107,7 +113,8 @@ public abstract class LeapArray<T> {
         // (timeMillis%1000)为当前时刻与当前时刻所在bucket起始时刻的差值
         // (timeMillis-timeMillis%1000)为当前时刻所在bucket的起始时刻
         long windowStart = calculateWindowStart(timeMillis);
-
+         
+		// 与Thread.yield()配合，自旋重试更新操作
         while (true) {
             WindowWrap<T> old = array.get(idx);
             
@@ -136,6 +143,7 @@ public abstract class LeapArray<T> {
                         updateLock.unlock();
                     }
                 } else {
+                    // 多线程竞争资源失败，主动放弃CPU时间片
                     Thread.yield();
                 }
             } else if (windowStart < old.windowStart()) {
@@ -167,6 +175,28 @@ public abstract class LeapArray<T> {
 ```
 
 ## 拦截责任链
+
+### 资源入口
+
+* 资源保护的入口为`SphU.entry`，该方法尝试获取调用凭证，如果能通过请求拦截过滤，则将成功返回，并得到调用凭证`Entry`，开始访问被保护的资源，最后通过`Entry#exit`释放获得的调用凭证；如果请求被拦截将抛出异常，进入异常处理逻辑。
+
+```java
+    Entry entry = null;
+    try {
+        // 尝试获取调用凭证
+        entry = SphU.entry("myResource");
+        // 被保护的业务逻辑
+        return String.valueOf(System.currentTimeMillis());
+    } catch (Exception ex) {
+        // 请求被拦截后处理逻辑
+        return "blocked";
+    } finally {
+        // 释放获得的调用凭证
+        if (entry != null) {
+            entry.exit();
+        }
+    }
+```
 
 ### 初始化
 
@@ -209,7 +239,7 @@ public class Context {
 
 * 上下文初始时上下文由`ContextUtil#trueEnter`完成，将资源调用的节点和Entry信息放入上下文，
 
-    该方法主要是先通过双检查机制保证在多个请求同时访问同一个资源，同时触发初始化上下文时，上下文只会被初始化一次；再构建名称为`sentinel_default_context`的入口节点，作为责任链的入口，最后生成上下文，并传入生成的入口节点node及名称，再将上下文加入`ThreadLocal`缓存，。
+    该方法主要是先通过双检查机制保证在多个请求同时访问同一个资源，同时触发初始化上下文时，上下文只会被初始化一次；再构建名称为`sentinel_default_context`的入口节点，没有实际含义，仅代表一次调用的入口，一个`Context`会对应一个`EntranceNode`。最后生成上下文，并传入生成的入口节点node及名称，再将上下文加入`ThreadLocal`缓存，。
 
 ```java
 public class ContextUtil {
@@ -248,7 +278,7 @@ public class ContextUtil {
 }
 ```
 
-* 查找责任链由`CtSph#lookProcessChain`完成，该过程同样使用双检查机制保证在多个请求同时访问同一个资源，同时触发初始化责任链时，责任链只会被初始化一次。该方法主要完成责任链的实例化，并添加`NodeSelector`,`SlotCluster`,`BuilderSlot`,`LogSlot`,`StatisticSlot`,`AuthoritySlot`,`SystemSlot`,`FlowSlot`,`DegradeSlot`这8个预加载的责任节点，最后以被保护资源为`key`，责任链为`value`加入缓存，一个资源对应一个拦截责任链。
+* 拦截请求书使用责任链设计模式，每种规则都是责任链中的节点，分别对应不同的类，请求需要经过所有拦截节点的处理。查找责任链由`CtSph#lookProcessChain`完成，该过程同样使用双检查机制保证在多个请求同时访问同一个资源，同时触发初始化责任链时，责任链只会被初始化一次。该方法主要完成责任链的实例化，并添加`NodeSelector`,`SlotCluster`,`BuilderSlot`,`LogSlot`,`StatisticSlot`,`AuthoritySlot`,`SystemSlot`,`FlowSlot`,`DegradeSlot`这8个预加载的责任节点，最后以被保护资源为`key`，责任链为`value`加入缓存，一个资源对应一个拦截责任链。
 
 ```java
 public class CtSph implements Sph {
@@ -312,7 +342,7 @@ public class DefaultNode extends StatisticNode {
 
 ```java
 public abstract class AbstractLinkedProcessorSlot<T> implements ProcessorSlot<T> {
-
+	//下一个责任链节点
     private AbstractLinkedProcessorSlot<?> next = null;
 	
     // 执行下一个责任链节点的入口,触发类型转换执行
@@ -543,7 +573,7 @@ public class StatisticSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
 }
 ```
 
-* 通过计数、阻塞计数、异常计数为执行``StatisticSlot#entry`方法更新，成功计数及响应时间为执行`StatisticSlot#exit`方法更新。当请求执行完毕，通过`Entry#exit`执行节点的`StatisticSlot#exit`方法，用作根据请求执行情况，更新请求异常、响应时间等统计数据。
+* 通过计数、阻塞计数、异常计数为执行``StatisticSlot#entry`方法更新，成功计数及响应时间为执行`StatisticSlot#exit`方法更新。当请求执行完毕，通过`Entry#exit`执行节点的`StatisticSlot#exit`方法，用作根据请求执行情况，更新请求异常、响应时间、正在处理请求数等统计数据，最终落实到`MetricBucket`中`counters`数组的更新。
 
 ```java
 public class StatisticSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
@@ -555,10 +585,8 @@ public class StatisticSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
             long completeStatTime = TimeUtil.currentTimeMillis();
             context.getCurEntry().setCompleteTimestamp(completeStatTime);
             long rt = completeStatTime - context.getCurEntry().getCreateTimestamp();
-
             Throwable error = context.getCurEntry().getError();
-
-            // Record response time and success count.
+            // 增加调用成功数，并减少正在处理请求数
             recordCompleteFor(node, count, rt, error);
             recordCompleteFor(context.getCurEntry().getOriginNode(), count, rt, error);
             if (resourceWrapper.getEntryType() == EntryType.IN) {
@@ -566,6 +594,177 @@ public class StatisticSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
             }
         }
         fireExit(context, resourceWrapper, count, args);
+    }
+}
+```
+
+## 熔断实现
+
+* 熔断功能由`DegradeSlot`实现，先获取该资源对应的全部断路器，再将请求依次通过全部断路器。
+
+```java
+public class DegradeSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
+    void performChecking(Context context, ResourceWrapper r) throws BlockException {
+        // 获取该资源对应的全部断路器
+        List<CircuitBreaker> circuitBreakers = DegradeRuleManager.getCircuitBreakers(r.getName());
+        // 将请求依次通过全部断路器
+        for (CircuitBreaker cb : circuitBreakers) {
+            if (!cb.tryPass(context)) {
+                throw new DegradeException(cb.getRule().getLimitApp(), cb.getRule());
+            }
+        }
+    }
+}
+```
+
+* 断路器的初始化在`DegradeRuleManager.RulePropertyListener#reloadFrom`中完成，通过读取`DegradeRule`列表，根据规则定义的断路器类型，返回指定类型的`CircuitBreaker`。
+
+    如果规则指定以按照响应时间为降级依据，将生成`ResponseTimeCircuitBreaker`，如果以异常数、异常比例为降级依据，将生成`ExceptionCircuitBreaker`。
+
+```java
+public final class DegradeRuleManager {
+    private static CircuitBreaker newCircuitBreakerFrom(/*@Valid*/ DegradeRule rule) {
+        switch (rule.getGrade()) {
+            // 规则指定以按照响应时间为降级依据 
+            case RuleConstant.DEGRADE_GRADE_RT:
+                return new ResponseTimeCircuitBreaker(rule);
+            // 以异常比例为降级依据
+            case RuleConstant.DEGRADE_GRADE_EXCEPTION_RATIO:
+            // 以异常数为降级依据
+            case RuleConstant.DEGRADE_GRADE_EXCEPTION_COUNT:
+                return new ExceptionCircuitBreaker(rule);
+            default:
+                return null;
+        }
+    }
+}
+```
+
+* 断路器的判断中，先判断当前断路器的状态：断路器如果处于开启状态，并且当前时间超过了熔断时间，则转为半开状态，并放行当前请求作为探测请求；断路器如果处于半开状态，将校验探测请求返回值，如果出现异常，则继续转为开启状态，如果返回值正常，说明链路恢复，转为关闭状态。断路器如果处于关闭状态，则说明当前断路器不拦截请求，直接放行请求。
+
+    <img src="./assets/2-1724418263587-3.png" alt="img" style="zoom:70%;" />
+
+```java
+public abstract class AbstractCircuitBreaker implements CircuitBreaker {
+    public boolean tryPass(Context context) {
+        // 断路器闭合，请求直接放行
+        if (currentState.get() == State.CLOSED) {
+            return true;
+        }
+        // 断路器打开
+        if (currentState.get() == State.OPEN) {
+            // 到达重试期限并且成功将断路器状态由打开变为半开
+            return retryTimeoutArrived() && fromOpenToHalfOpen(context);
+        }
+        return false;
+    }
+    
+    protected boolean retryTimeoutArrived() {
+        return TimeUtil.currentTimeMillis() >= nextRetryTimestamp;
+    }
+    
+    protected boolean fromOpenToHalfOpen(Context context) {
+        // CAS方法将断路器状态由打开变为半开
+        if (currentState.compareAndSet(State.OPEN, State.HALF_OPEN)) {
+            Entry entry = context.getCurEntry();
+            // 设置请求返回时回调
+            entry.whenTerminate(new BiConsumer<Context, Entry>() {
+                @Override
+                public void accept(Context context, Entry entry) {
+                    if (entry.getBlockError() != null) {
+                        // 如果请求失败，将断路器由半开改为打开，暂时不再放行后续请求
+                        currentState.compareAndSet(State.HALF_OPEN, State.OPEN);
+                    }
+                }
+            });
+            return true;
+        }
+        return false;
+    }
+}
+```
+
+* `DegradeSlot`在退出时，调用`CircuitBreaker#onRequestComplete`方法，获取请求执行结果，更新统计数据，并更新断路器状态。
+
+```java
+public class DegradeSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
+        public void exit(Context context, ResourceWrapper r, int count, Object... args) {
+        Entry curEntry = context.getCurEntry();
+        if (curEntry.getBlockError() != null) {
+            fireExit(context, r, count, args);
+            return;
+        }
+        List<CircuitBreaker> circuitBreakers = DegradeRuleManager.getCircuitBreakers(r.getName());
+        if (curEntry.getBlockError() == null) {
+            // 请求被放行，更新断路器统计数据
+            for (CircuitBreaker circuitBreaker : circuitBreakers) {
+                circuitBreaker.onRequestComplete(context);
+            }
+        }
+        fireExit(context, r, count, args);
+    }
+}
+```
+
+* `onRequestComplete`方法将自行统计值更新和断路器状态更新。断路器内部维护滑动窗口，记录统计基本单位内请求总数和慢请求数。请求滑动窗口计数器本质上指向`WindowWrap<SlowRequestCounter>`数组，和`StatisticNode`中的滑动窗口数组类似，`SlowRequestCounter`中记录慢请求和所有请求数量，用于更新断路器状态。`WindowWrap<SlowRequestCounter>`还额外添加`SlowRequestCounter`开始时间及`SlowRequestCounter`的长度。
+
+```java
+    
+public class ResponseTimeCircuitBreaker extends AbstractCircuitBreaker {
+    // 请求后置处理
+    private final LeapArray<SlowRequestCounter> slidingCounter;
+    public void onRequestComplete(Context context) {
+        SlowRequestCounter counter = slidingCounter.currentWindow().value();
+        Entry entry = context.getCurEntry();
+        // 获取请求响应耗时，并更新时间窗口中慢请求计数器和放行请求计数器
+        long completeTime = entry.getCompleteTimestamp();
+        long rt = completeTime - entry.getCreateTimestamp();
+        if (rt > maxAllowedRt) {
+            counter.slowCount.add(1);
+        }
+        counter.totalCount.add(1);
+        handleStateChangeWhenThresholdExceeded(rt);
+    }
+     static SlowRequestCounter {
+        // 慢请求计数器
+        private LongAdder slowCount;
+        // 所有请求计数器
+        private LongAdder totalCount;
+    }
+}
+```
+
+* 更新断路器状态时，如果断路器处理半开状态，则说明当前请求为探测请求，用于判断服务实例是否可用，如果探测请求响应时间未超时，则说明服务实例恢复正常，将断路器由半开修改为闭合，后续不再拦截请求，如果探测请求超时，说明服务实例仍旧不可用，将有半开变为打开，不再放行请求。
+
+    如果杜鲁奇处于关闭状态，将获得滑动窗口类全部有效的`SlowRequestCounter`，并汇总`SlowRequestCounter`数据，计算慢请求比例。如果慢请求比例超过阈值，证明下游服务实例异常，将断路器由闭合变为打开。
+
+```java
+private void handleStateChangeWhenThresholdExceeded(long rt) {
+    // 如果断路器处理半开状态，则说明当前请求为探测请求
+    if (currentState.get() == State.HALF_OPEN) {
+        // 探测请求响应时间未超时，则说明服务实例恢复正常，将断路器由半开修改为闭合
+        if (rt > maxAllowedRt) {
+            fromHalfOpenToOpen(1.0d);
+        } else {
+            // 探测请求超时，说明服务实例仍旧不可用，将有半开变为打开
+            fromHalfOpenToClose();
+        }
+        return;
+    }
+    // 获得位于滑动窗口时间范围内的全部SlowRequestCounter
+    List<SlowRequestCounter> counters = slidingCounter.values();
+    long slowCount = 0;
+    long totalCount = 0;
+    // 汇总SlowRequestCounter数据 
+    for (SlowRequestCounter counter : counters) {
+        slowCount += counter.slowCount.sum();
+        totalCount += counter.totalCount.sum();
+    }
+	// 计算慢请求比例
+    double currentRatio = slowCount * 1.0d / totalCount;
+	// 超过阈值，证明下游服务实例异常，将断路器由闭合变为打开
+    if (currentRatio > maxSlowRequestRatio) {
+        transformToOpen(currentRatio);
     }
 }
 ```
