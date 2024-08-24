@@ -1,476 +1,783 @@
-[Gary's Blog](https://myblackboxrecorder.com/)
+[![返回主页](./assets/logo-1724509973076-1.gif)](https://www.cnblogs.com/luozhiyun/)
 
-- [Home](https://myblackboxrecorder.com/)
-- [Archives](https://myblackboxrecorder.com/archives)
-- [Tags](https://myblackboxrecorder.com/tags)
-- [about](https://myblackboxrecorder.com/about)
+# [luozhiyun](https://www.cnblogs.com/luozhiyun)
 
-# Sentinel源码阅读（四）
+- 
+- [首页](https://www.cnblogs.com/luozhiyun/)
+- [标签](https://www.cnblogs.com/luozhiyun/tag)
+- [关于](https://www.luozhiyun.com/关于)
+- [新随笔](https://i.cnblogs.com/EditPosts.aspx?opt=1)
+- 
+- 
+- 
 
-*2021-10-11*
+# [1.Sentinel源码分析—FlowRuleManager加载规则做了什么？](https://www.cnblogs.com/luozhiyun/p/11439993.html)
 
-[#技术](https://myblackboxrecorder.com/tags/技术/) [#Java](https://myblackboxrecorder.com/tags/Java/) [#Sentinel](https://myblackboxrecorder.com/tags/Sentinel/)
+![img](./assets/Post-2019--08--31 18%3A18-blue.svg+xml)![img](./assets/Read-5139-red.svg+xml)![img](./assets/Comment-0-green.svg+xml)
+分类: [Sentinel](https://www.cnblogs.com/luozhiyun/category/1538235.html) 标签: [Sentinel](https://www.cnblogs.com/luozhiyun/tag/Sentinel/)
 
-前文：
+最近我很好奇在RPC中限流熔断降级要怎么做，hystrix已经1年多没有更新了，感觉要被遗弃的感觉，那么我就把眼光聚焦到了阿里的Sentinel，顺便学习一下阿里的源代码。
 
-[Sentinel源码阅读（一）](https://myblackboxrecorder.com/Sentinel_reading_1/)
+这一章我主要讲的是FlowRuleManager在加载FlowRule的时候做了什么，下一篇正式讲Sentinel如何控制并发数的。
 
-[Sentinel源码阅读（二）](https://myblackboxrecorder.com/Sentinel_reading_2/)
+下面我给出一个简化版的demo，这个demo只能单线程访问，先把过程讲清楚再讲多线程版本。
 
-[Sentinel源码阅读（三）](https://myblackboxrecorder.com/sentinel-reading-3/)
+初始化流量控制的规则：限定20个线程并发访问
 
-本文将是该系列的最后一篇，主要解析限流部分原理
+```java
+Copypublic class FlowThreadDemo {
 
-限流的责任链节点为FlowSlot，代码结构如下：
+    private static AtomicInteger pass = new AtomicInteger();
+    private static AtomicInteger block = new AtomicInteger();
+    private static AtomicInteger total = new AtomicInteger();
+    private static AtomicInteger activeThread = new AtomicInteger();
 
-![img](./assets/structure.png)
+    private static volatile boolean stop = false;
+    private static final int threadCount = 100;
 
-重要的类有：
+    private static int seconds = 60 + 40;
+    private static volatile int methodBRunningTime = 2000;
 
-- FlowSlot：责任链节点
-- FlowRuleChecker：实际限流的执行者
-- TrafficShapingController：限流器，其有多种实现，在controller包下
+    public static void main(String[] args) throws Exception {
+        System.out.println(
+            "MethodA will call methodB. After running for a while, methodB becomes fast, "
+                + "which make methodA also become fast ");
+        tick();
+        initFlowRule();
 
-FlowSlot内逻辑非常简单，就是调用了FlowRuleChecker::checkFlow方法。
-
-```
-public void checkFlow(Function<String, Collection<FlowRule>> ruleProvider, ResourceWrapper resource,
-                      Context context, DefaultNode node, int count, boolean prioritized) throws BlockException {
-    if (ruleProvider == null || resource == null) {
-        return;
+        Entry methodA = null;
+        try {
+            TimeUnit.MILLISECONDS.sleep(5);
+            methodA = SphU.entry("methodA");
+            activeThread.incrementAndGet();
+            //Entry methodB = SphU.entry("methodB");
+            TimeUnit.MILLISECONDS.sleep(methodBRunningTime);
+            //methodB.exit();
+            pass.addAndGet(1);
+        } catch (BlockException e1) {
+            block.incrementAndGet();
+        } catch (Exception e2) {
+            // biz exception
+        } finally {
+            total.incrementAndGet();
+            if (methodA != null) {
+                methodA.exit();
+                activeThread.decrementAndGet();
+            }
+        }
     }
-    Collection<FlowRule> rules = ruleProvider.apply(resource.getName());
-    if (rules != null) {
-        for (FlowRule rule : rules) {
-            if (!canPassCheck(rule, context, node, count, prioritized)) {
-                throw new FlowException(rule.getLimitApp(), rule);
+
+    private static void initFlowRule() {
+        List<FlowRule> rules = new ArrayList<FlowRule>();
+        FlowRule rule1 = new FlowRule();
+        rule1.setResource("methodA");
+        // set limit concurrent thread for 'methodA' to 20
+        rule1.setCount(20);
+        rule1.setGrade(RuleConstant.FLOW_GRADE_THREAD);
+        rule1.setLimitApp("default");
+
+        rules.add(rule1);
+        FlowRuleManager.loadRules(rules);
+    }
+
+    private static void tick() {
+        Thread timer = new Thread(new TimerTask());
+        timer.setName("sentinel-timer-task");
+        timer.start();
+    }
+
+    static class TimerTask implements Runnable {
+
+        @Override
+        public void run() {
+            long start = System.currentTimeMillis();
+            System.out.println("begin to statistic!!!");
+
+            long oldTotal = 0;
+            long oldPass = 0;
+            long oldBlock = 0;
+
+            while (!stop) {
+                try {
+                    TimeUnit.SECONDS.sleep(1);
+                } catch (InterruptedException e) {
+                }
+                long globalTotal = total.get();
+                long oneSecondTotal = globalTotal - oldTotal;
+                oldTotal = globalTotal;
+
+                long globalPass = pass.get();
+                long oneSecondPass = globalPass - oldPass;
+                oldPass = globalPass;
+
+                long globalBlock = block.get();
+                long oneSecondBlock = globalBlock - oldBlock;
+                oldBlock = globalBlock;
+
+                System.out.println(seconds + " total qps is: " + oneSecondTotal);
+                System.out.println(TimeUtil.currentTimeMillis() + ", total:" + oneSecondTotal
+                    + ", pass:" + oneSecondPass
+                    + ", block:" + oneSecondBlock
+                    + " activeThread:" + activeThread.get());
+                if (seconds-- <= 0) {
+                    stop = true;
+                }
+                if (seconds == 40) {
+                    System.out.println("method B is running much faster; more requests are allowed to pass");
+                    methodBRunningTime = 20;
+                }
+            }
+
+            long cost = System.currentTimeMillis() - start;
+            System.out.println("time cost: " + cost + " ms");
+            System.out.println("total:" + total.get() + ", pass:" + pass.get()
+                + ", block:" + block.get());
+            System.exit(0);
+        }
+    }
+}
+```
+
+### FlowRuleManager[#](https://www.cnblogs.com/luozhiyun/p/11439993.html#19567421)
+
+在这个demo中，首先会调用FlowRuleManager#loadRules进行规则注册
+我们先聊一下规则配置的代码：
+
+```java
+Copyprivate static void initFlowRule() {
+    List<FlowRule> rules = new ArrayList<FlowRule>();
+    FlowRule rule1 = new FlowRule();
+    rule1.setResource("methodA");
+    // set limit concurrent thread for 'methodA' to 20
+    rule1.setCount(20);
+    rule1.setGrade(RuleConstant.FLOW_GRADE_THREAD);
+    rule1.setLimitApp("default");
+
+    rules.add(rule1);
+    FlowRuleManager.loadRules(rules);
+}
+```
+
+这段代码里面先定义一个**流量控制规则**，然后调用loadRules进行注册。
+
+#### FlowRuleManager初始化[#](https://www.cnblogs.com/luozhiyun/p/11439993.html#1260358755)
+
+**FlowRuleManager**
+FlowRuleManager 类里面有几个静态参数：
+
+```java
+Copy//规则集合
+private static final Map<String, List<FlowRule>> flowRules = new ConcurrentHashMap<String, List<FlowRule>>();
+//监听器
+private static final FlowPropertyListener LISTENER = new FlowPropertyListener();
+//用来监听配置是否发生变化
+private static SentinelProperty<List<FlowRule>> currentProperty = new DynamicSentinelProperty<List<FlowRule>>();
+
+//创建一个延迟的线程池
+@SuppressWarnings("PMD.ThreadPoolCreationRule")
+private static final ScheduledExecutorService SCHEDULER = Executors.newScheduledThreadPool(1,
+    new NamedThreadFactory("sentinel-metrics-record-task", true));
+
+static {
+    //设置监听
+    currentProperty.addListener(LISTENER);
+    //每一秒钟调用一次MetricTimerListener的run方法
+    SCHEDULER.scheduleAtFixedRate(new MetricTimerListener(), 0, 1, TimeUnit.SECONDS);
+}
+```
+
+在初始化的时候会为静态变量都赋上值。
+
+在新建MetricTimerListener实例的时候做了很多事情，容我慢慢分析。
+
+**MetricTimerListener**
+
+```java
+Copypublic class MetricTimerListener implements Runnable {
+
+    private static final MetricWriter metricWriter = new MetricWriter(SentinelConfig.singleMetricFileSize(),
+        SentinelConfig.totalMetricFileCount());
+	   ....
+}
+```
+
+首次初始化MetricTimerListener的时候会创建一个MetricWriter实例。我们先看传入的两个参数SentinelConfig.*singleMetricFileSize*()和SentinelConfig.*totalMetricFileCount*()。
+
+SentinelConfig在首次初始化的时候会初始化静态代码块：
+
+**SentinelConfig**
+
+```java
+Copystatic {
+    try {
+        initialize();
+        loadProps();
+        resolveAppType();
+        RecordLog.info("[SentinelConfig] Application type resolved: " + appType);
+    } catch (Throwable ex) {
+        RecordLog.warn("[SentinelConfig] Failed to initialize", ex);
+        ex.printStackTrace();
+    }
+}
+```
+
+这段静态代码块主要是设置一下配置参数。
+
+**SentinelConfig#singleMetricFileSize**
+**SentinelConfig#totalMetricFileCount**
+
+```java
+Copypublic static long singleMetricFileSize() {
+    try {
+        //获取的是 1024 * 1024 * 50
+        return Long.parseLong(props.get(SINGLE_METRIC_FILE_SIZE));
+    } catch (Throwable throwable) {
+        RecordLog.warn("[SentinelConfig] Parse singleMetricFileSize fail, use default value: "
+                + DEFAULT_SINGLE_METRIC_FILE_SIZE, throwable);
+        return DEFAULT_SINGLE_METRIC_FILE_SIZE;
+    }
+}
+
+public static int totalMetricFileCount() {
+    try {
+        //默认是：6
+        return Integer.parseInt(props.get(TOTAL_METRIC_FILE_COUNT));
+    } catch (Throwable throwable) {
+        RecordLog.warn("[SentinelConfig] Parse totalMetricFileCount fail, use default value: "
+                + DEFAULT_TOTAL_METRIC_FILE_COUNT, throwable);
+        return DEFAULT_TOTAL_METRIC_FILE_COUNT;
+    }
+}
+```
+
+singleMetricFileSize方法和totalMetricFileCount主要是获取SentinelConfig在静态变量里设入得参数。
+
+然后我们进入到MetricWriter的构造方法中：
+**MetricWriter**
+
+```java
+Copypublic MetricWriter(long singleFileSize, int totalFileCount) {
+    if (singleFileSize <= 0 || totalFileCount <= 0) {
+        throw new IllegalArgumentException();
+    }
+    RecordLog.info(
+            "[MetricWriter] Creating new MetricWriter, singleFileSize=" + singleFileSize + ", totalFileCount="
+                    + totalFileCount);
+    //  /Users/luozhiyun/logs/csp/
+    this.baseDir = METRIC_BASE_DIR;
+    File dir = new File(baseDir);
+    if (!dir.exists()) {
+        dir.mkdirs();
+    }
+
+    long time = System.currentTimeMillis();
+    //转换成秒
+    this.lastSecond = time / 1000;
+    //singleFileSize = 1024 * 1024 * 50
+    this.singleFileSize = singleFileSize;
+    //totalFileCount = 6
+    this.totalFileCount = totalFileCount;
+    try {
+        this.timeSecondBase = df.parse("1970-01-01 00:00:00").getTime() / 1000;
+    } catch (Exception e) {
+        RecordLog.warn("[MetricWriter] Create new MetricWriter error", e);
+    }
+}
+```
+
+构造器里面主要是创建文件夹，设置单个文件大小，总文件个数，设置时间。
+
+讲完了MetricTimerListener的静态属性，现在我们来讲MetricTimerListener的run方法。
+
+**MetricTimerListener#run**
+
+```java
+Copypublic void run() {
+    //这个run方法里面主要是做定时的数据采集，然后写到log文件里去
+    Map<Long, List<MetricNode>> maps = new TreeMap<Long, List<MetricNode>>();
+    //遍历集群节点
+    for (Entry<ResourceWrapper, ClusterNode> e : ClusterBuilderSlot.getClusterNodeMap().entrySet()) {
+        String name = e.getKey().getName();
+        ClusterNode node = e.getValue();
+        Map<Long, MetricNode> metrics = node.metrics();
+        aggregate(maps, metrics, name);
+    }
+    //汇总统计的数据
+    aggregate(maps, Constants.ENTRY_NODE.metrics(), Constants.TOTAL_IN_RESOURCE_NAME);
+    if (!maps.isEmpty()) {
+        for (Entry<Long, List<MetricNode>> entry : maps.entrySet()) {
+            try {
+                //写入日志中
+                metricWriter.write(entry.getKey(), entry.getValue());
+            } catch (Exception e) {
+                RecordLog.warn("[MetricTimerListener] Write metric error", e);
             }
         }
     }
 }
 ```
 
-会对每种FlowRule，执行canPassCheck检查是否可以通过，如果不能，抛出FlowException，这是一种BlockException。
+上面的run方法其实就是每秒把统计的数据写到日志里去。其中`Constants.ENTRY_NODE.metrics()`负责统计数据，我们下面分析以下这个方法。
 
-canPassCheck中有两个分支，分别为单机限流passLocalCheck与集群限流passLocalCheck，我们本次只分析常用的单机限流。
+`Constants.ENTRY_NODE`这句代码会实例化一个ClusterNode实例。
+ClusterNode是继承StatisticNode，统计数据时在StatisticNode中实现的。
 
-```
-private static boolean passLocalCheck(FlowRule rule, Context context, DefaultNode node, int acquireCount,
-                                      boolean prioritized) {
-    Node selectedNode = selectNodeByRequesterAndStrategy(rule, context, node);
-    if (selectedNode == null) {
-        return true;
-    }
+![img](./assets/1204119-20190831181929219-257540092-1724509973076-6.png)
 
-    return rule.getRater().canPass(selectedNode, acquireCount, prioritized);
+Metrics方法也是调用的StatisticNode方法。
+
+我们先看看**StatisticNode**的全局变量
+
+```java
+Copypublic class StatisticNode implements Node {
+		//构建一个统计60s的数据，设置60个滑动窗口，每个窗口1s
+		//这里创建的是BucketLeapArray实例来进行统计
+		private transient volatile Metric rollingCounterInSecond = new ArrayMetric(SampleCountProperty.SAMPLE_COUNT,
+    IntervalProperty.INTERVAL);
+		//上次统计的时间戳
+		private long lastFetchTime = -1;
+		.....
 }
 ```
 
-首先根据调用方与流控模式拿到相关的Node。
+然后我们看看StatisticNode的metrics方法：
+**StatisticNode#metrics**
 
-流控模式包含三种：
-
-- 直接流控模式（DIRECT）：最简单的模式，对当前资源达到条件后直接限流。
-- 关联流控模式（RELATE）：定义一个关联接口，当关联接口达到限流条件，当前资源会限流。
-- 链路流控模式（CHAIN）：针对来源进行区分，定义一个入口资源，如果当前资源达到限流条件，只会对该入口进行限流。
-
-selectNodeByRequesterAndStrategy方法中的逻辑为
-
-- 直接流控模式下
-    - 如果配置了限流上游为default（全部），返回当前的clusterNode
-    - 如果配置了且与当前调用来源匹配，返回当前来源的originNode
-    - 都不匹配，返回null，不需要限流
-- 关联流控模式下
-    - 返回关联资源的clusterNode
-- 链路模式下
-    - 如果context中的来源与配置匹配，返回当前Node
-    - 不匹配，返回null，不需要限流
-
-最后是执行限流规则中配置的限流器的canPass方法，我们接下来重点分析下这个方法。
-
-### 限流器
-
-限流器就是TrafficShapingController，我们直接看它的几种实现类，对应几种流控效果，类图如下：
-
-![img](./assets/TrafficShapingController.png)
-
-- DefaultController：快速失败
-- WarmUpController：预热
-- RateLimiterController：匀速排队
-- WarmUpRateLimiterController：预热+匀速排队
-
-我们逐个分析
-
-#### DefaultController
-
-DefaultController的算法较为简单，就是当前统计窗口（每秒），判断是否有足够剩余的容量（代码中也用了令牌的概念）计算如果剩余令牌足够就放行，否则，如果设置了允许occupied_pass，会先借用未来的时间窗口，如果都不行则会直接拒绝（快速失败）。借用相关逻辑在StatisticNode，逻辑就是去计算要到下一个空闲bucket所需时间（借用则会占用，下次不能再借），再与超时时间进行比较。
-
-```
-public boolean canPass(Node node, int acquireCount, boolean prioritized) {
-    // 计算已使用的令牌，如果是qps则计算passQps，否则计算线程数
-    int curCount = avgUsedTokens(node);
-    // 如果当前请求加入会超出令牌上限
-    if (curCount + acquireCount > count) {
-        // 如果当前为高优先级业务，且指标为QPS
-        if (prioritized && grade == RuleConstant.FLOW_GRADE_QPS) {
-            long currentTime;
-            long waitInMs;
-            currentTime = TimeUtil.currentTimeMillis();
-            // 尝试借用未来时间窗口，获取一个等待时间
-            waitInMs = node.tryOccupyNext(currentTime, acquireCount, count);
-            if (waitInMs < OccupyTimeoutProperty.getOccupyTimeout()) {
-                node.addWaitingRequest(currentTime + waitInMs, acquireCount);
-                node.addOccupiedPass(acquireCount);
-                // sleep至未来时间窗口
-                sleep(waitInMs);
-
-                // PriorityWaitException indicates that the request will pass after waiting for {@link @waitInMs}.
-                throw new PriorityWaitException(waitInMs);
-            }
+```java
+Copypublic Map<Long, MetricNode> metrics() {
+    // The fetch operation is thread-safe under a single-thread scheduler pool.
+    long currentTime = TimeUtil.currentTimeMillis();
+    //获取当前时间的滑动窗口的开始时间
+    currentTime = currentTime - currentTime % 1000;
+    Map<Long, MetricNode> metrics = new ConcurrentHashMap<>();
+    //获取滑动窗口里统计的数据
+    List<MetricNode> nodesOfEverySecond = rollingCounterInMinute.details();
+    long newLastFetchTime = lastFetchTime;
+    // Iterate metrics of all resources, filter valid metrics (not-empty and up-to-date).
+    for (MetricNode node : nodesOfEverySecond) {
+        //筛选符合的滑动窗口的节点
+        if (isNodeInTime(node, currentTime) && isValidMetricNode(node)) {
+            metrics.put(node.getTimestamp(), node);
+            //选出符合节点里最大的时间戳数据赋值
+            newLastFetchTime = Math.max(newLastFetchTime, node.getTimestamp());
         }
+    }
+    //设置成滑动窗口里统计的最大时间
+    lastFetchTime = newLastFetchTime;
+
+    return metrics;
+}
+```
+
+这个方法主要是调用rollingCounterInMinute进行数据的统计，然后筛选出有效的统计结果返回。
+
+我们进入到rollingCounterInMinute是ArrayMetric的实例，所以我们进入到ArrayMetric的details方法中
+
+**ArrayMetric#details**
+
+```java
+Copypublic List<MetricNode> details() {
+    List<MetricNode> details = new ArrayList<MetricNode>();
+    //调用BucketLeapArray
+    data.currentWindow();
+    //列出统计结果
+    List<WindowWrap<MetricBucket>> list = data.list();
+    for (WindowWrap<MetricBucket> window : list) {
+        if (window == null) {
+            continue;
+        }
+        //对统计结果进行封装
+        MetricNode node = new MetricNode();
+        //代表一秒内被流量控制的请求数量
+        node.setBlockQps(window.value().block());
+        //则是一秒内业务本身异常的总和
+        node.setExceptionQps(window.value().exception());
+        // 代表一秒内到来到的请求
+        node.setPassQps(window.value().pass());
+        //代表一秒内成功处理完的请求；
+        long successQps = window.value().success();
+        node.setSuccessQps(successQps);
+        //代表一秒内该资源的平均响应时间
+        if (successQps != 0) {
+            node.setRt(window.value().rt() / successQps);
+        } else {
+            node.setRt(window.value().rt());
+        }
+        //设置统计窗口的开始时间
+        node.setTimestamp(window.windowStart());
+
+        node.setOccupiedPassQps(window.value().occupiedPass());
+
+        details.add(node);
+    }
+
+    return details;
+}
+```
+
+这个方法首先会调用`dat.currentWindow（）`设置当前时间窗口到窗口列表里去。然后调用`data.list()`列出所有的窗口数据，然后遍历不为空的窗口数据封装成MetricNode返回。
+
+data是BucketLeapArray的实例，BucketLeapArray继承了LeapArray，主要的统计都是在LeapArray中进行的，所以我们直接看看LeapArray的currentWindow方法。
+
+**LeapArray#currentWindow**
+
+```java
+Copypublic WindowWrap<T> currentWindow(long timeMillis) {
+    if (timeMillis < 0) {
+        return null;
+    }
+    //通过当前时间判断属于哪个窗口
+    int idx = calculateTimeIdx(timeMillis);
+    //计算出窗口开始时间
+    // Calculate current bucket start time.
+    long windowStart = calculateWindowStart(timeMillis);
+
+    while (true) {
+        //获取数组里的老数据
+        WindowWrap<T> old = array.get(idx);
+        if (old == null) {
+           
+            WindowWrap<T> window = new WindowWrap<T>(windowLengthInMs, windowStart, newEmptyBucket(timeMillis));
+            if (array.compareAndSet(idx, null, window)) {
+                // Successfully updated, return the created bucket.
+                return window;
+            } else {
+                // Contention failed, the thread will yield its time slice to wait for bucket available.
+                Thread.yield();
+            }
+            // 如果对应时间窗口的开始时间与计算得到的开始时间一样
+            // 那么代表当前即是我们要找的窗口对象，直接返回
+        } else if (windowStart == old.windowStart()) {
+             
+            return old;
+        } else if (windowStart > old.windowStart()) { 
+            //如果当前的开始时间小于原开始时间，那么就更新到新的开始时间
+            if (updateLock.tryLock()) {
+                try {
+                    // Successfully get the update lock, now we reset the bucket.
+                    return resetWindowTo(old, windowStart);
+                } finally {
+                    updateLock.unlock();
+                }
+            } else {
+                // Contention failed, the thread will yield its time slice to wait for bucket available.
+                Thread.yield();
+            }
+        } else if (windowStart < old.windowStart()) {
+            //一般来说不会走到这里
+            // Should not go through here, as the provided time is already behind.
+            return new WindowWrap<T>(windowLengthInMs, windowStart, newEmptyBucket(timeMillis));
+        }
+    }
+}
+```
+
+这个方法里首先会传入一个timeMillis是当前的时间戳。然后调用calculateTimeIdx
+
+```java
+Copyprivate int calculateTimeIdx(/*@Valid*/ long timeMillis) {
+    //计算当前时间能够落在array的那个节点上
+    long timeId = timeMillis / windowLengthInMs;
+    // Calculate current index so we can map the timestamp to the leap array.
+    return (int)(timeId % array.length());
+}
+```
+
+calculateTimeIdx方法用当前的时间戳除以每个窗口的大小，再和array数据取模。array数据是一个容量为60的数组，代表被统计的60秒分割的60个小窗口。
+
+举例：
+例如当前timeMillis = 1567175708975
+timeId = 1567175708975/1000 = 1567175708
+timeId % array.length() = 1567175708%60 = 8
+也就是说当前的时间窗口是第八个。
+
+然后调用calculateWindowStart计算当前时间开始时间
+
+```java
+Copyprotected long calculateWindowStart(/*@Valid*/ long timeMillis) {
+    //用当前时间减去窗口大小，计算出窗口开始时间
+    return timeMillis - timeMillis % windowLengthInMs;
+}
+```
+
+接下来就是一个while循环：
+在看while循环之前我们看一下array数组里面是什么样的对象
+`WindowWrap<T> window = new WindowWrap<T>(windowLengthInMs, windowStart, newEmptyBucket(timeMillis));`
+WindowWrap是一个时间窗口的包装对象，里面包含时间窗口的长度，这里是1000；窗口开始时间；窗口内的数据实体，是调用newEmptyBucket方法返回一个MetricBucket。
+
+**MetricBucket**
+
+```java
+Copypublic class MetricBucket {
+
+	private final LongAdder[] counters;
+	//默认4900
+	private volatile long minRt;
+
+	public MetricBucket() {
+	    MetricEvent[] events = MetricEvent.values();
+	    this.counters = new LongAdder[events.length];
+	    for (MetricEvent event : events) {
+	        counters[event.ordinal()] = new LongAdder();
+	    }
+	    //初始化minRt，默认是4900
+	    initMinRt();
+	}
+	...
+}
+```
+
+MetricEvent是一个枚举类：
+
+```java
+Copypublic enum MetricEvent {
+    PASS,
+    BLOCK,
+    EXCEPTION,
+    SUCCESS,
+    RT,
+    OCCUPIED_PASS
+}
+```
+
+也就是是MetricBucket为每个窗口通过一个内部数组counters统计了这个窗口内的所有数据。
+
+接下来我们来讲一下while循环里所做的事情：
+
+1. 从array里获取bucket节点
+2. 如果节点已经存在，那么用CAS更新一个新的节点
+3. 如果节点是新的，那么直接返回
+4. 如果节点失效了，设置当前节点，清除所有失效节点
+
+举例：
+
+```yaml
+Copy1. 如果array数据里面的bucket数据如下所示：
+     B0       B1      B2    NULL      B4
+ ||_______|_______|_______|_______|_______||___
+ 200     400     600     800     1000    1200  timestamp
+                             ^
+                          time=888
+正好当前时间所对应的槽位里面的数据是空的，那么就用CAS更新
+
+2. 如果array里面已经有数据了，并且槽位里面的窗口开始时间和当前的开始时间相等，那么直接返回
+     B0       B1      B2     B3      B4
+ ||_______|_______|_______|_______|_______||___
+ 200     400     600     800     1000    1200  timestamp
+                             ^
+                          time=888
+
+3. 例如当前时间是1676，所对应窗口里面的数据的窗口开始时间小于当前的窗口开始时间，那么加上锁，然后设置槽位的窗口开始时间为当前窗口开始时间，并把槽位里面的数据重置
+   (old)
+             B0       B1      B2    NULL      B4
+ |_______||_______|_______|_______|_______|_______||___
+ ...    1200     1400    1600    1800    2000    2200  timestamp
+                              ^
+                           time=1676
+```
+
+所以上面的array数组大概是这样：
+
+![img](./assets/1204119-20190831181956239-1265211138-1724509973076-8.png)
+
+array数组由一个个的WindowWrap实例组成，WindowWrap实例里面由MetricBucket进行数据统计。
+
+然后继续回到ArrayMetric的details方法，讲完了上面的`data.currentWindow()`，现在再来讲`data.list()`
+
+list方法最后也会调用到LeapArray的list方法中：
+**LeapArray#list**
+
+```java
+Copypublic List<WindowWrap<T>> list(long validTime) {
+    int size = array.length();
+    List<WindowWrap<T>> result = new ArrayList<WindowWrap<T>>(size);
+
+    for (int i = 0; i < size; i++) {
+        WindowWrap<T> windowWrap = array.get(i);
+        //如果windowWrap节点为空或者当前时间戳比windowWrap的窗口开始时间大超过60s，那么就跳过
+        //也就是说只要60s以内的数据
+        if (windowWrap == null || isWindowDeprecated(validTime, windowWrap)) {
+            continue;
+        }
+        result.add(windowWrap);
+    }
+    return result;
+}
+```
+
+这个方法是用来把array里面都统计好的节点都找出来，并且是不为空，且是当前时间60秒内的数据。
+
+最后Constants.*ENTRY_NODE*.metrics() 会返回所有符合条件的统计节点数据然后传入aggregate方法中，遍历为每个MetricNode节点设置Resource为*TOTAL_IN_RESOURCE_NAME*，封装好调用`metricWriter.write`进行写日志操作。
+
+最后总结一下在初始化FlowRuleManager的时候做了什么：
+
+1. FlowRuleManager在初始化的时候会调用静态代码块进行初始化
+
+2. 在静态代码块内调用ScheduledExecutorService线程池，每隔1秒调用一次MetricTimerListener的run方法
+
+3. MetricTimerListener会调用
+
+    ```
+    Constants.ENTRY_NODE.metrics()
+    ```
+
+    进行定时的统计
+
+    1. 调用StatisticNode进行统计，统计60秒内的数据，并将60秒的数据分割成60个小窗口
+    2. 在设置当前窗口的时候如果里面没有数据直接设置，如果存在数据并且是最新的直接返回，如果是旧数据，那么reset原来的统计数据
+    3. 每个小窗口里面的数据由MetricBucket进行封装
+
+4. 最后将统计好的数据通过*metricWriter*写入到log里去
+
+#### FlowRuleManager加载规则[#](https://www.cnblogs.com/luozhiyun/p/11439993.html#3703963808)
+
+FlowRuleManager是调用loadRules进行规则加载的：
+
+**FlowRuleManager#loadRules**
+
+```java
+Copypublic static void loadRules(List<FlowRule> rules) {
+    currentProperty.updateValue(rules);
+}
+```
+
+currentProperty这个实例是在FlowRuleManager是在静态代码块里面进行加载的，上面我们讲过，生成的是DynamicSentinelProperty的实例。
+
+我们进入到DynamicSentinelProperty的updateValue中：
+
+```java
+Copypublic boolean updateValue(T newValue) {
+    //判断新的元素和旧元素是否相同
+    if (isEqual(value, newValue)) {
         return false;
+    }
+    RecordLog.info("[DynamicSentinelProperty] Config will be updated to: " + newValue);
+
+    value = newValue;
+    for (PropertyListener<T> listener : listeners) {
+        listener.configUpdate(newValue);
     }
     return true;
 }
 ```
 
-#### WarmUpController
+updateValue方法就是校验一下是不是已经存在相同的规则了，如果不存在那么就直接设置value等于新的规则，然后通知所有的监听器更新一下规则配置。
 
-当服务未达到一个稳定状态时，一般即仍在初始化时（如建立数据库连接，java static变量懒加载），服务的承载能力可能会远低于稳定状态，即使相对少的请求，仍会拖垮服务，所以我们需要预热（WarmUp），让处理请求的数量缓缓增多。
+*currentProperty*实例里面的监听器会在FlowRuleManager初始化静态代码块的时候设置一个FlowPropertyListener监听器实例，FlowPropertyListener是FlowRuleManager的内部类：
 
-WarmUpController用了令牌桶算法（或者说思想）。
+```java
+Copyprivate static final class FlowPropertyListener implements PropertyListener<List<FlowRule>> {
 
-![img](./assets/token1.png)
-
-令牌以一个恒定的速率添加到桶中，当有新的数据包进来时，需要检查桶是否包含足够的令牌。如果不符合，则会按照各种策略进行处理（WarmUpController使用了预热的策略）。
-
-官网上的图，允许通过的qps随时间的变化：
-
-![img](./assets/slope.png)
-
-**一开始，系统流量很少，突然流量开始飙增，飙增到一个冷启动阈值时，触发预热，流量缓缓增加，直到达到限流阈值。**
-
-下面我们通过看源码，了解具体实现。
-
-```
-public class WarmUpController implements TrafficShapingController {
-    protected double count;
-    private int coldFactor;
-    protected int warningToken = 0;
-    private int maxToken;
-    protected double slope;
-
-    protected AtomicLong storedTokens = new AtomicLong(0);
-    protected AtomicLong lastFilledTime = new AtomicLong(0);
-}
-
-
-/**
- * 初始化函数，构造时调用
- */
-private void construct(double count, int warmUpPeriodInSec, int coldFactor) {
-    if (coldFactor <= 1) {
-        throw new IllegalArgumentException("Cold factor should be larger than 1");
-    }
-    this.count = count;
-    this.coldFactor = coldFactor;
-    warningToken = (int)(warmUpPeriodInSec * count) / (coldFactor - 1);
-    maxToken = warningToken + (int)(2 * warmUpPeriodInSec * count / (1.0 + coldFactor));
-    slope = (coldFactor - 1.0) / count / (maxToken - warningToken);
-}
-```
-
-Sentinel的预热算法基于的基本逻辑是（实际代码实现方式有区别）：
-
-- 假设系统每秒能承载x数量的请求
-- 每一秒，都会有x个令牌被添加到桶中，直至桶的上限
-- 每个请求到来时，会使用一个令牌
-- 桶中存在的令牌越多，说明系统的利用率越低
-- 当桶中（令牌/上限）达到一个阈值，视为系统进入饱和状态
-
-我们再简单分析成员变量：
-
-- count：配置的限流阈值，也是桶的上限
-- warmUpPeriodInSec：配置的冷启动需要的时间，单位秒
-- coldFactor：冷启动因子，默认为3，主要用在算法中，见下文，由coldFactor可以得到触发冷启动的阈值threshold为count/coldFactor
-- warningToken：一个警戒线，是冷启动阈值的实现。如果令牌数大于这个值，说明需要预热或还在预热期
-- maxToken：桶中token数上限
-- slope：斜率，见下文
-- storedTokens：桶存储的token数
-- lastFilledTime：上一次进入限流器的时间，用于判断时间过去了多久，以添加对应数量的令牌到桶中
-
-一个问题是，桶的上限、警戒线与斜率为什么是这么算的？
-
-这坨公式和含义啃了好久，还需要参考Guava的一个实现（因为Sentinel的限流算法基于Guava理论）：
-
-[Guava 实现](https://github.com/google/guava/blob/master/guava/src/com/google/common/util/concurrent/SmoothRateLimiter.java)
-
-> Sentinel’s “warm-up” implementation is based on the Guava’s algorithm.However, Guava’s implementation focuses on adjusting the request interval, which is similar to leaky bucket. Sentinel pays more attention to controlling the count of incoming requests per second without calculating its interval, which resembles token bucket algorithm.
-
-注释中提到，Guava聚焦于调整请求的间隔，从而控制流量。为了便于理解Sentinel的实现，我们先看Guava的实现
-
-```
-         ^ throttling
-         |
-   cold  +                  /
-interval |                 /.
-         |                / .
-         |               /  .   
-         |              /   .     
-         |             /    .
-         |            /     .
-         |           /      .
-  stable +----------/  WARM .
-interval |          .   UP  .
-         |          . PERIOD.
-         |          .       .
-       0 +----------+-------+--------------→ storedTokens
-         0   warningTokens maxTokens
-```
-
-一个坐标图，变量名与sentinel尽量做了匹配。其中横坐标是桶中的令牌数，纵坐标是从桶中取出令牌需要的时间间隔。为什么有时间间隔？Guava的理念是，假设qps上限为100，那么稳定状态下的时间间隔就应该是10ms。Guava通过如让线程sleep的方式，来调整时间间隔，从而达到预热缓慢让qps上升的效果，从而实现流量的控制。
-
-其中stable interval表示稳定状态下的时间间隔，即100ms。cold interval表示系统完全在“冷”的状态，即桶为满状态下的时间间隔。两个状态的令牌数分别为warningTokens与maxTokens。而在实际系统中，预热是从右往左进行的，从cold状态逐步进入stable状态。中间的这段过程则是预热的过程。cold interval/stable interval是Guava中的coldFactor，默认也为3。
-
-Guava定义预热的过程是线性的，那么从maxTokens到warningTokens是一个梯形，**这个梯形的面积就是预热的时间WarmUpPeriod**，如果你不理解，可以想象下微积分，是同理的（带入值，划分成长方体），如果还不理解，可以评论区留言。
-
-那么有公式1:
-
-因为Sentinel没有时间间隔一说，更关注数量。稳定状态下，每秒能取count个令牌。而Guava中1/stableInterval就是是1秒除以稳定状态下取一个令牌需要的时间，也就是稳定状态下1秒内能取到的令牌数，两者是相等的。等式1:
-
-然后则有以下公式
-
-这样，上面maxTokens的计算公式就推导出来了。接下来是warningTokens。
-
-可以看出来这个坐标图的形状是与warningTokens相关的，在两个interval与warmUpPeriod固定的情况下，warningTokens值的变化，会引起maxTokens的变化，进而引起整个图形的变化。那么很明显它不是被一个计算的值，而是一个约定的值。以什么规则约定的？
-
-其实，coldFactor除了是coldInterval/stableInterval的值以外，还有一个规则，即从maxTokens到0这个过程中，期望在stable状态下的时间是总时间的 1/coldFactor。stable状态下的时间是图形左边的矩形面积：stableInterval * warningTokens，梯形面积已经知道，那么有公式：
-
-由于上面的等式1，则有
-
-这样warningTokens的公式也推导出来了。
-
-至于斜率slope，指的也是坐标图中预热过程斜坡的斜率，比较好计算：
-
-slope公式也推导完成。这部分的要点要去了解Guava的算法基础，否则，很难去理解这几个参数的含义。
-
-接下来，我们继续看限流器中的细节。之前提到限流会调用限流器的canPass方法，与Guava相比，Sentinel调整流量速率的方式就是部分通过部分不通过，判断是否通过则要根据令牌桶了，如下。
-
-```
-public boolean canPass(Node node, int acquireCount, boolean prioritized) {
-    long passQps = (long) node.passQps();
-    long previousQps = (long) node.previousPassQps();
-    syncToken(previousQps);
-    // 开始计算它的斜率
-    // 如果进入了警戒线，开始调整他的qps
-    long restToken = storedTokens.get();
-    if (restToken >= warningToken) {
-        long aboveToken = restToken - warningToken;
-        double warningQps = Math.nextUp(1.0 / (aboveToken * slope + 1.0 / count));
-        if (passQps + acquireCount <= warningQps) {
-            return true;
+    @Override
+    public void configUpdate(List<FlowRule> value) {
+        Map<String, List<FlowRule>> rules = FlowRuleUtil.buildFlowRuleMap(value);
+        if (rules != null) {
+            flowRules.clear();
+            //这个map的维度是key是Resource
+            flowRules.putAll(rules);
         }
-    } else {
-        if (passQps + acquireCount <= count) {
-            return true;
+        RecordLog.info("[FlowRuleManager] Flow rules received: " + flowRules);
+    }
+	 ....
+}
+```
+
+configUpdate首先会调用`FlowRuleUtil.buildFlowRuleMap（）`方法将所有的规则按resource分类，然后排序返回成map，然后将FlowRuleManager的原来的规则清空，放入新的规则集合到flowRules中去。
+
+**FlowRuleUtil#buildFlowRuleMap**
+这个方法最后会调用到FlowRuleUtil的另一个重载的方法：
+
+```java
+Copypublic static <K> Map<K, List<FlowRule>> buildFlowRuleMap(List<FlowRule> list, Function<FlowRule, K> groupFunction,
+                                                          Predicate<FlowRule> filter, boolean shouldSort) {
+    Map<K, List<FlowRule>> newRuleMap = new ConcurrentHashMap<>();
+    if (list == null || list.isEmpty()) {
+        return newRuleMap;
+    }
+    Map<K, Set<FlowRule>> tmpMap = new ConcurrentHashMap<>();
+
+    for (FlowRule rule : list) {
+        //校验必要字段：资源名，限流阈值， 限流阈值类型，调用关系限流策略，流量控制效果等
+        if (!isValidRule(rule)) {
+            RecordLog.warn("[FlowRuleManager] Ignoring invalid flow rule when loading new flow rules: " + rule);
+            continue;
         }
-    }
-    return false;
-}
-```
-
-可以看到有个syncToken方法，这个方法是用来更新桶中的令牌数的，至于为什么传入的是前一秒的qps，因为每次请求令牌的计算实际是在下一次才需要去算的，所以sentinel选择同步令牌桶的时机为限流前，而不是每次请求结束后再去更新令牌桶。syncToken中的逻辑就是上面提到的“每秒往桶内添加count个令牌”，以及“拿走previousQps个令牌”（这里有个细节，只有 当令牌的消耗程度远远低于警戒线的时候，才会添加）。
-
-接下去判断当前桶内令牌数restTokens是否超过warningTokens，超过说明需要预热，否则说明已经在stable状态，直接按普通限流处理即可。当需要预热时，我们需要调整qps让他不超过当前计算出的warningQps。这个warningQps计算公式也要通过Guava那张坐标图理解。
-
-```
-         ^ throttling
-         |               restTokens
-   cold  +              .   /
-interval |              .  /.
-         |              . / .
-         |              ./  .   
-         |              /------------> interval    
-         |             /    .
-         |            /     .
-         |           /      .
-  stable +----------/  WARM .
-interval |          .   UP  .
-         |          . PERIOD.
-         |          .       .
-       0 +----------+-------+--------------→ storedTokens
-         0   warningTokens maxTokens
-```
-
-调整qps与调整时间间隔效果是一样的，他们的关系是warningQps = 1 / interval，当前处于的位置横坐标为restTokens，很明显，可以算出来纵坐标的interval为
-
-换算一下，代入一下代码的变量：
-
-与代码中一致。接下去的代码就好理解了，判断是否超过warningQps，是则限流，否则不限，放进来作为预热，缓慢增加qps。至此，WarmingUpController部分看完了。
-
-#### RateLimiterController
-
-RateLimiterController的限流策略是匀速排队，有了上面GuavaRateLimiter的基础，我们很容易理解，其作用就是通过让线程sleep来调整请求的间隔，达到匀速排队的效果。这种方式主要用于处理间隔性突发的流量，例如消息队列。想象一下这样的场景，在某一秒有大量的请求到来，而接下来的几秒则处于空闲状态，我们希望系统能够在接下来的空闲期间逐渐处理这些请求，而不是在第一秒直接拒绝多余的请求。
-
-![img](./assets/1.png)
-
-看代码
-
-```
-public class RateLimiterController implements TrafficShapingController {
-    private final int maxQueueingTimeMs;
-    private final double count;
-    private final AtomicLong latestPassedTime = new AtomicLong(-1);
-}
-```
-
-- maxQueueingTimeMs：最大的排队时间，如果需要排队的时间超过这个值，那么就直接拒绝，不排队了
-- count：限流阈值
-- latestPassedTime：上一次请求通过的时间戳
-
-canPass方法：
-
-```
-public boolean canPass(Node node, int acquireCount, boolean prioritized) {
-    // Pass when acquire count is less or equal than 0.
-    if (acquireCount <= 0) {
-        return true;
-    }
-    // Reject when count is less or equal than 0.
-    // Otherwise,the costTime will be max of long and waitTime will overflow in some cases.
-    if (count <= 0) {
-        return false;
-    }
-
-    long currentTime = TimeUtil.currentTimeMillis();
-    // Calculate the interval between every two requests.
-    long costTime = Math.round(1.0 * (acquireCount) / count * 1000);
-
-    // Expected pass time of this request.
-    long expectedTime = costTime + latestPassedTime.get();
-
-    if (expectedTime <= currentTime) {
-        // Contention may exist here, but it's okay.
-        latestPassedTime.set(currentTime);
-        return true;
-    } else {
-        // Calculate the time to wait.
-        long waitTime = costTime + latestPassedTime.get() - TimeUtil.currentTimeMillis();
-        if (waitTime > maxQueueingTimeMs) {
-            return false;
-        } else {
-            long oldTime = latestPassedTime.addAndGet(costTime);
-            try {
-                waitTime = oldTime - TimeUtil.currentTimeMillis();
-                if (waitTime > maxQueueingTimeMs) {
-                    latestPassedTime.addAndGet(-costTime);
-                    return false;
-                }
-                // in race condition waitTime may <= 0
-                if (waitTime > 0) {
-                    Thread.sleep(waitTime);
-                }
-                return true;
-            } catch (InterruptedException e) {
-            }
+        if (filter != null && !filter.test(rule)) {
+            continue;
         }
-    }
-    return false;
-}
-```
-
-使用了漏桶算法，偷网上的图：
-
-![img](./assets/2-1724423685882-6.png)
-
-核心是可以看作一个带有常量服务时间的队列，有请求就一直放入桶中直到溢出丢弃，流出的速度也被捅所控制（一般是固定值）。在Sentinel中，这个队列长度就是maxQueueingTimeMs，限定流出的速度是1 / count秒，这样就做到了匀速排队。
-
-理解了漏桶算法再看代码就比较简单，先通过算等待时间判断能不能放入队列中了，如果能放入则sleep直至匀速要求的时间间隔再放行，否则拒绝。这里有个不好理解的地方是waitTime为什么要一模一样的算两次，考虑是在高并发下保险一点？如果你有答案可以在评论区留言。
-
-值得一提的是令牌桶算法与漏桶算法的适合业务场景。两者都可以做到流量控制，漏桶较为简单，直接控制请求的速度，且阈值一直是恒定的，多余的请求会首先尝试排队再去拒绝。令牌桶因为桶中会有过往的令牌，它能允许短时间内通过比阈值更大的流量，因此我认为应对抖动的突发流量令牌桶会更合适（当然，你还需要关注下游是否能承载这样的突发流量）。而如果业务场景更关注请求可用，因为漏桶会先去尝试排队，请求可能只是慢一点而不是直接拒绝，对用户体验来说好一些。例如长时间的高并发场景（秒杀、抢购、0点签到），这些场景已经不能归于“抖动”的范畴，且业务上肯定更希望尽量多的的请求成功，即使慢一些，这时候漏桶会合适一些。
-
-#### WarmUpRateLimiterController
-
-WarmUpRateLimiterController是WarmUpController子类，它其实就是将上述两个限流器结合起来，博采众长。
-
-它的canPass方法结合了两者，流程是：
-
-- 预热的步骤，同步令牌桶，计算预热的warningQps
-- 用这个warningQps替代count计算排队需要的等待时间
-- 后面则是排队步骤
-
-```
-public boolean canPass(Node node, int acquireCount, boolean prioritized) {
-    long previousQps = (long) node.previousPassQps();
-    syncToken(previousQps);
-
-    long currentTime = TimeUtil.currentTimeMillis();
-
-    long restToken = storedTokens.get();
-    long costTime = 0;
-    long expectedTime = 0;
-    if (restToken >= warningToken) {
-        long aboveToken = restToken - warningToken;
-
-        // current interval = restToken*slope+1/count
-        double warmingQps = Math.nextUp(1.0 / (aboveToken * slope + 1.0 / count));
-        costTime = Math.round(1.0 * (acquireCount) / warmingQps * 1000);
-    } else {
-        costTime = Math.round(1.0 * (acquireCount) / count * 1000);
-    }
-    expectedTime = costTime + latestPassedTime.get();
-
-    if (expectedTime <= currentTime) {
-        latestPassedTime.set(currentTime);
-        return true;
-    } else {
-        long waitTime = costTime + latestPassedTime.get() - currentTime;
-        if (waitTime > timeoutInMs) {
-            return false;
-        } else {
-            long oldTime = latestPassedTime.addAndGet(costTime);
-            try {
-                waitTime = oldTime - TimeUtil.currentTimeMillis();
-                if (waitTime > timeoutInMs) {
-                    latestPassedTime.addAndGet(-costTime);
-                    return false;
-                }
-                if (waitTime > 0) {
-                    Thread.sleep(waitTime);
-                }
-                return true;
-            } catch (InterruptedException e) {
-            }
+        //应用名，如果没有则会使用default
+        if (StringUtil.isBlank(rule.getLimitApp())) {
+            rule.setLimitApp(RuleConstant.LIMIT_APP_DEFAULT);
         }
+        //设置拒绝策略：直接拒绝、Warm Up、匀速排队，默认是DefaultController
+        TrafficShapingController rater = generateRater(rule);
+        rule.setRater(rater);
+
+        //获取Resource名字
+        K key = groupFunction.apply(rule);
+        if (key == null) {
+            continue;
+        }
+        //根据Resource进行分组
+        Set<FlowRule> flowRules = tmpMap.get(key);
+
+        if (flowRules == null) {
+            // Use hash set here to remove duplicate rules.
+            flowRules = new HashSet<>();
+            tmpMap.put(key, flowRules);
+        }
+
+        flowRules.add(rule);
     }
-    return false;
+    //根据ClusterMode LimitApp排序
+    Comparator<FlowRule> comparator = new FlowRuleComparator();
+    for (Entry<K, Set<FlowRule>> entries : tmpMap.entrySet()) {
+        List<FlowRule> rules = new ArrayList<>(entries.getValue());
+        if (shouldSort) {
+            // Sort the rules.
+            Collections.sort(rules, comparator);
+        }
+        newRuleMap.put(entries.getKey(), rules);
+    }
+    return newRuleMap;
 }
 ```
 
-**WarmUpRateLimiterController相对WarmUpController的变化是改变了达到警戒线后的策略，不是直接拒绝而是排队。相对RateLimiterController的变化则是让排队不再是匀速的，在cold阶段，速度较慢，stable阶段，速度较快，有预热的效果。**
+这个方法首先校验传进来的rule集合不为空，然后遍历rule集合。对rule的必要字段进行校验，如果传入了过滤器那么校验过滤器，然后过滤resource为空的rule，最后相同的resource的rule都放到一起排序后返回。
+注意这里默认生成的rater是DefaultController。
 
-至此，限流部分结束。另外第一篇里讲到了隔离，其实隔离就是限流的一种，只是限的不是qps，而是线程数，我们可以看到代码中取令牌可以有算qps和算线程数两种方式，如果是线程数，其实用处就是隔离了。
+到这里FlowRuleManager已经分析完毕了，比较长。
 
-另外剩余的如黑白名单控制，系统规则其实都较为简单。黑白名单控制在`AuthoritySlot`，逻辑是根据Context中的origin与规则中的配置做比较配对，再做控制。系统规则在`SystemSlot`，有一个全局的类存储配置，并且其qps等指标不会从当前Node拿，而是会从一个全局的ClusterNode拿，这个node会聚合所有下面Node的指标，系统规则就根据全局的指标执行全局的系统规则。
+0
 
-### 总结
+[« ](https://www.cnblogs.com/luozhiyun/p/11413856.html)上一篇： [12.源码分析—如何为SOFARPC写一个序列化？](https://www.cnblogs.com/luozhiyun/p/11413856.html)
+[» ](https://www.cnblogs.com/luozhiyun/p/11451557.html)下一篇： [2. Sentinel源码分析—Sentinel是如何进行流量统计的？](https://www.cnblogs.com/luozhiyun/p/11451557.html)
 
-至此，Sentinel的源码阅读告一段落了（长舒一口气），前前后后快三个月时间。从一开始看通主要流程后觉得还比较简单，到死磕Context、Statistics、Degrade、FlowControl等难度较大的模块，收获良多，也切实反馈到了实际工作中。一些诸如锁、上下文模块、责任链模式等从代码中学到的内容，在做一些业务基础设施时，怎么设计怎么写，对我有很大的参考价值。而且读源码与读其他归纳的博客是不一样的，且不说那些博客有大量雷同，含金量未知，这个思考的过程以及细节的推敲是只有源码阅读才能带给你的。最后，如果你看到了这里，感谢你的阅读，希望对你理解Sentinel以及其中的原理算法有帮助。
-
-[0](https://github.com/Elliotloststh/elliotloststh.github.io/issues/16) 条评论
-
-未登录用户
+posted @ 2019-08-31 18:18 [luozhiyun](https://www.cnblogs.com/luozhiyun) 阅读(5139) 评论(0) [编辑](https://i.cnblogs.com/EditPosts.aspx?postid=11439993) [收藏](javascript:void(0)) [举报](javascript:void(0))
 
 
 
-[支持 Markdown 语法](https://guides.github.com/features/mastering-markdown/)预览使用 GitHub 登录
 
-来做第一个留言的人吧！
 
-------
+（评论功能已被禁用）
 
-- 
--  
-- 
+[![img](./assets/35695-20240328092537879-1189167464.jpg)](https://cnblogs.vip/)
 
-© 2022 Gary Yuan
+**编辑推荐：**
+· [什么？！90%的 ThreadLocal 都在滥用或错用！](https://www.cnblogs.com/sgh1023/p/18375055)
+· [方法的三种调用形式](https://www.cnblogs.com/artech/p/18363117/method-invocation-dotnet)
+· [小小的引用计数，大大的性能考究](https://www.cnblogs.com/binlovetech/p/18369244)
+· [如何做好团队开发中的 CodeReview（代码评审）？](https://www.cnblogs.com/CodeBlogMan/p/18278962)
+· [可以调用 Null 的实例方法吗？](https://www.cnblogs.com/artech/p/18362421/call_callvirt)
+
+**阅读排行：**
+· [【故障公告】博客站点遭遇大规模 DDoS 攻击](https://www.cnblogs.com/cmt/p/18375777)
+· [小公司后端架构、代码、流程吐槽](https://www.cnblogs.com/Go-Solo/p/18334477)
+· [从网友探秘 《黑神话：悟空》 的脚本说说C#](https://www.cnblogs.com/shanyou/p/18377461)
+· [什么？！90%的ThreadLocal都在滥用或错用！](https://www.cnblogs.com/sgh1023/p/18375055)
+· [除了按值和引用，方法参数的第三种传递方式](https://www.cnblogs.com/artech/p/18374284/typed_reference)
+
+Copyright © 2024 luozhiyun
+Powered by .NET 8.0 on Kubernetes
+
+Powered By [Cnblogs](https://www.cnblogs.com/) | Theme [simple-color1.0.0](https://github.com/YJLAugus/cnblogs-theme-simple-color)

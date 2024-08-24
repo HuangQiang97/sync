@@ -395,21 +395,24 @@ public class FlowRuleChecker {
 
 ### 漏桶限流
 
-* `RateLimiterController`使用漏桶算法，假定服务器以固定速率消耗请求。
+* `RateLimiterController`使用漏桶算法，直接控制请求的速度，假定处理每个请求的时间相等，使用长度有限的队列存储请求，请求到来就放入队列中，直到超出队列容量，另一侧假定服务器以固定速率消耗请求。使用这种算法时希望系统能够在空闲期间逐渐处理突发请求，而不是在第一秒直接拒绝多余的请求。
 
-    假设系统最近一次放行请求的时间为$t_p$，每秒钟能处理$q$个请求。当有$n_r$个请求到达时，首先计算处理完这$n_r$个请求需要的时间$\Delta t=n_r\times\frac{1}{q}$，得到放行请求的时刻$t_e=t_p+\Delta t$，四个时间可以用下图表示
+* 假设系统最近一次放行请求的时间为$t_p$，每秒钟能处理$q$个请求。当有$n_r$个请求到达时，首先计算处理完这$n_r$个请求需要的时间$\Delta t=n_r\times\frac{1}{q}$，得到放行请求的时刻$t_e=t_p+\Delta t$，四个时间可以用下图表示
 
     <img src="./assets/image-20240820202806915.png" alt="image-20240820202806915" style="zoom: 33%;" />
 
     比较期望放行时刻$t_e$与当前时刻$t_n$大小
 
-    * 如果$t_e > t_n$：说明$t_n-t_p<\Delta t$，空闲的时间间隔无法处理新到来请求，需要等待$t_n$增大，等待时间为$t_p+\Delta t-t_n$
+    * 如果$t_e > t_n$：说明$t_n-t_p<\Delta t$，空闲的时间间隔无法处理新到来请求，需要等待$t_n$增大，等待时间为$t_p+\Delta t-t_n$，如果等待时间超限，则直接放弃。
     * 如果$t_e \leq  t_n$​：说明$t_n-t_p\ t_c$，空闲的时间间隔能够处理新到来请求，不需等待。
+    
 
-    在实现细节上：
+* 在实现细节上：
 
     * 由于在高并发下，线程在计算过程中可能被中断过，并且在大QPS下请求等待时间较短，中断时间不可忽略，所以每次用到当前时刻$t_n$都需要实时从系统获取，柱塞时间也需要重新计算；
+
     * 判断处请求将被柱塞时，需要提前将最近放行请求时间更新，相当于提前预支了服务器时间，当有新请求到来时，将在新设置的最近放行请求时间上计算，不影响之前被阻塞请求放行；
+
     * 更新最近放行请求时间的操作需要是原子操作，防止多个请求同时到到，并发修改最近放行请求时间。
 
 ```java
@@ -460,21 +463,64 @@ public class RateLimiterController implements TrafficShapingController {
 
 ### 令牌桶限流
 
-* `WarmUpController`实现了带预热的令牌桶发算法。它设定令牌生成间隔和令牌桶中剩余令牌数成反比，当令牌桶中堆积较多令牌时，证明当前系统QPS较小，需要增大生成令牌的时间间隔；当令牌桶中剩余令牌较少时，证明当前系统QPS较大，需要减少生成令牌的时间间隔。
+* 令牌桶算法中按照设定速率往令牌桶中加入令牌，请求如果能获得令牌则放行，否则拒绝。相较于漏桶算法，因为令牌桶中会有过往的令牌，能允许短时间内通过比阈值更大的流量，能更好的应对抖动的突发流量。
 
-* 推过这种策略，当单位时间请求数组件增大时，令牌生成间隔不断减少，单位时间放行的请求将逐渐增多，直至到达设定的最大放行请求数。等价于给冷系统一个预热的时间，给出额外时间进行初始化，避免流量突然增加时，大量请求直接获得令牌进入系统，瞬间把系统压垮。
+* 在实际系统中，当服务未达到一个稳定状态时，即仍在初始化时，服务的承载能力可能会远低于稳定状态，所以需要预热，让处理请求的数量缓缓增多。此时传统的令牌桶算法，当系统之前请求数较少，令牌桶中堆积大量令牌，此时突发大量请求，因为令牌桶中会有过往的令牌，能允许短时间内通过比阈值更大的流量，此时系统可能面临极大的压力，所以需要控制系统由空闲转为繁忙时，放行的请求数。
 
-* 当桶内堆积令牌数大于`tps`时，进入预热阶段，预热开始时令牌生成间隔`ci=fc/count`，预热结束时令牌生成间隔`si=1/count`，预热时长`wp` ,预热阶段令牌生成间隔和堆积令牌数成正比。
+* `WarmUpController`实现了带预热的令牌桶发算法。它设定令牌生成间隔和令牌桶中剩余令牌数成反比，通过这种策略，当系统处于空闲状态时，请求数突增，请求数达到冷启动阈值时，触发预热，流量缓缓增加，直到达到限流阈值。当单位时间请求数逐渐增大时，令牌生成间隔不断减少，单位时间放行的请求将逐渐增多，直至到达设定的最大放行请求数。等价于给冷系统一个预热的时间，给出额外时间进行初始化，避免流量突然增加时，大量请求直接获得令牌进入系统，瞬间把系统压垮。
 
-  <img src="./assets/1204119-20190908230555824-529025744.png" alt="img" style="zoom:70%;" />
+    <img src="./assets/slope.png" alt="img" style="zoom:70%;" />
+
+* 当突发大量请求到来时，下图的横轴从左向右移动，堆积令牌数不断减少。当桶内堆积令牌数大于`tps`时，处于预热阶段，预热阶段令牌生成间隔和堆积令牌数成正比。当堆积令牌数为令牌桶允许最大容量时，令牌生成间隔`ci=fc/count`。堆积令牌等于预热阈值`tps`时，令牌生成间隔为`si=1/count`。整个预热时长`wp` ，随着堆积令牌数的减少，令牌生成间隔线性减少，直至堆积令牌数小于`tps`，令牌生成间隔稳定为`1/count`。
+
+  <img src="./assets/image-20240824202109916.png" alt="image-20240824202109916" style="zoom:40%;" /><img src="./assets/image-20240824202123398.png" alt="image-20240824202123398" style="zoom:40%;" />
 
   
 
-* 开启预热的阈值定义为$tps=\frac{wp}{fc/count-1/count}=\frac{wp*count}{fc-1}$
+* 预热阈值`tps`的定义为：令牌数从`Max Permits`减少到0这个过程中，期望在稳定状态下的时间是总时间的 `1/cf`。对于曲线`Stored Permits-Throtting Time`，如果在横轴上取长为$\Delta permits$的区间，假设其长度极短，其与曲线取围成的图形可近似为矩形，矩形面积为$\Delta permits\times intercal=\Delta permits\times 1/QPS=\Delta t$，即围成面积为时间。
 
-  令牌桶内最大令牌数`mps`=开启预热的阈值`tps`+预热期间生成的令牌数`wps`。由于预热期间令牌生成间隔从$fc/count$到$1/count$均匀变化，所以预热期间生成令牌的平均间隔为$(\frac{fc}{count}+\frac{1}{count})/2$，`wp`时间内生成的令牌数$wps=wp*\frac{1}{(\frac{fc}{count}+\frac{1}{count})/2}$。
+  则稳定阶段时长：
+  $$
+  sp=tps\times1/count
+  $$
+  
 
-* 在进入预热阶段，令牌生成间隔与堆积令牌数曲线的斜率等于预热开始与终止时，令牌生成时间间隔之差除以预热开始与终止时令牌堆积数之差，$k=\frac{ci-si}{mps-tps}=\frac{cf-1}{cout*(mps-tps)}$，得到预热阶段令牌生成速率`qps`与当前堆积令牌数`ps`的关系$wcount=\frac{1}{(ps-tps)*k+1/count}$。
+  根据定义得到：
+  $$
+  \frac{sp}{sp+wp}=\frac{1}{cf}
+  $$
+  
+
+  求解得到预热开启阈值：
+  $$
+  tps=\frac{wp\times count}{cf-1}
+  $$
+  
+
+  预热阶段的时长：
+  $$
+  wp=\frac{(1/count+cf/count)\times(mps-tps)}{2}
+  $$
+  
+
+  求解得到最大堆积令牌数：
+  $$
+  mps=tps+\frac{2wp}{1/count+cf/count}
+  $$
+  
+
+  在预热阶段，令牌生成间隔与堆积令牌数曲线的斜率等于预热开始与终止时，令牌生成时间间隔之差除以预热开始与终止时令牌堆积数之差
+  $$
+  k=\frac{ci-si}{mps-tps}=\frac{cf-1}{count\times (mps-tps)}
+  $$
+
+  得到预热阶段令牌生成速率`wcount`与当前堆积令牌数`ps`的关系
+$$
+wcount=\frac{1}{(ps-tps)\times k+1/count}
+$$
+
+* 根据上述分析，`WarmUpController`的初始化参数与上述公式一致。
+
 
 ```java
 public class WarmUpController implements TrafficShapingController {
@@ -482,19 +528,17 @@ public class WarmUpController implements TrafficShapingController {
     private void construct(double count, int warmUpPeriodInSec, int coldFactor) {
         this.count = count;
         this.coldFactor = coldFactor;
-        // 当桶内堆积令牌数大于wt时，进入预热阶段
-        // 预热开始时令牌生成速率 count/fc，预热结束时令牌生成速率 count，预热时长wp
-        // 预热阶段令牌生成间隔和堆积令牌数成正比
+        // 预热开始阈值与上述tps计算一致
         warningToken = (int)(warmUpPeriodInSec * count) / (coldFactor - 1);
-        // 令牌桶内最大令牌数等于开启预热的阈值+预热期间生成的令牌数
+        // 令牌桶内最大令牌数计算方式与mps一致
         maxToken = warningToken + (int)(2 * warmUpPeriodInSec * count / (1.0 + coldFactor));
-        // 斜率等于预热开始与终止令牌生成时间间隔只差处于预热开始与终止令牌堆积数
+        // 曲线斜率计算方式与k一致
         slope = (coldFactor - 1.0) / count / (maxToken - warningToken);
     }
 }
 ```
 
-* 当请求到来时，先通过`WarmUpController#coolDownTokens`计算当前令牌桶堆积令牌数，涉及计算最近一次生成令牌时间与当前时间之间生成的令牌数，当堆积令牌数超过预热阈值`tps`时，令牌生成速率为`count/fc`；当堆积令牌数未超过预热阈值`tps`时，令牌生成速率为`count`。
+* 当请求到来时，先通过`WarmUpController#coolDownTokens`计算当前令牌桶堆积令牌数，涉及计算最近一次生成令牌时间与当前时间之间生成的令牌数。
 
 ```java
 public class WarmUpController implements TrafficShapingController {
@@ -505,8 +549,8 @@ public class WarmUpController implements TrafficShapingController {
         if (oldValue < warningToken) {
             newValue = (long)(oldValue + (currentTime - lastFilledTime.get()) * count / 1000);
         } else if (oldValue > warningToken) {
+            // 只有当令牌的消耗程度低于警戒线的时候，才会添加新的令牌
             if (passQps < (int)count / coldFactor) {
-                // 令牌堆积严重，降低生成令牌速率
                 newValue = (long)(oldValue + (currentTime - lastFilledTime.get()) * count / 1000);
             }
         }
@@ -515,7 +559,11 @@ public class WarmUpController implements TrafficShapingController {
 }
 ```
 
-* 判断请求是否被拦截由`WarmUpController#canPass`实现。先判断堆积令牌数是否超过预热阈值`tps`，如果未超过阈值，说明令牌堆积较少，正常生成令牌，系统QPS维持预定值`count`；令牌超过阈值，说明消耗较慢，需要减少令牌生成速率，当前QPS降低为$wcount=\frac{1}{(ps-tps)*k+1/count}$。
+* 判断请求是否被拦截由`WarmUpController#canPass`实现。先判断堆积令牌数是否超过预热阈值`tps`，如果未超过阈值，说明令牌堆积较少，系统QPS较高，正常速度生成令牌，系统QPS上限维持预定值`count`；堆积令牌超过阈值，说明消耗较慢，需要减少令牌生成速率，当前QPS上限降低为
+    $$
+    wcount=\frac{1}{(ps-tps)\times k+1/count}
+    $$
+    
 
 ```java
 public class WarmUpController implements TrafficShapingController {
@@ -526,7 +574,7 @@ public class WarmUpController implements TrafficShapingController {
         syncToken(previousQps);
         long restToken = storedTokens.get();
         if (restToken >= warningToken) {
-            // 令牌堆积炒超过阈值，说明消耗较慢，需要减少令牌生成速率，降低放行QPS
+            // 令牌堆积超过阈值，说明消耗较慢，需要减少令牌生成速率，降低放行QPS
             long aboveToken = restToken - warningToken;
             // 当前令牌生成间隔restToken*slope+1/count
             double warningQps = Math.nextUp(1.0 / (aboveToken * slope + 1.0 / count));
@@ -535,7 +583,7 @@ public class WarmUpController implements TrafficShapingController {
                 return true;
             }
         } else {
-            // 令牌堆积较少，正常生成令牌，系统QPS维持预定值
+            // 令牌堆积较少，正常生成令牌，系统QPS上限维持预定值
             if (passQps + acquireCount <= count) {
                 return true;
             }
