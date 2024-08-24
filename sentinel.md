@@ -222,6 +222,8 @@ public class CtSph implements Sph {
     }
 ```
 
+#### 上下文初始化
+
 * `Context`是线程持有的，维持着入口节点、本次调用链路的当前节点、调用来源信息，利用``ThreadLocal`与当前线程绑定，`Context` 将贯穿一次调用链路中的所有 `Entry`，当任务执行完毕后被清除。
 
 ```java
@@ -277,6 +279,8 @@ public class ContextUtil {
     return context;
 }
 ```
+
+#### 责任链初始化
 
 * 拦截请求书使用责任链设计模式，每种规则都是责任链中的节点，分别对应不同的类，请求需要经过所有拦截节点的处理。查找责任链由`CtSph#lookProcessChain`完成，该过程同样使用双检查机制保证在多个请求同时访问同一个资源，同时触发初始化责任链时，责任链只会被初始化一次。该方法主要完成责任链的实例化，并添加`NodeSelector`,`SlotCluster`,`BuilderSlot`,`LogSlot`,`StatisticSlot`,`AuthoritySlot`,`SystemSlot`,`FlowSlot`,`DegradeSlot`这8个预加载的责任节点，最后以被保护资源为`key`，责任链为`value`加入缓存，一个资源对应一个拦截责任链。
 
@@ -395,6 +399,8 @@ public class FlowRuleChecker {
 
 ### 漏桶限流
 
+#### 原理
+
 * `RateLimiterController`使用漏桶算法，直接控制请求的速度，假定处理每个请求的时间相等，使用长度有限的队列存储请求，请求到来就放入队列中，直到超出队列容量，另一侧假定服务器以固定速率消耗请求。使用这种算法时希望系统能够在空闲期间逐渐处理突发请求，而不是在第一秒直接拒绝多余的请求。
 
 * 假设系统最近一次放行请求的时间为$t_p$，每秒钟能处理$q$个请求。当有$n_r$个请求到达时，首先计算处理完这$n_r$个请求需要的时间$\Delta t=n_r\times\frac{1}{q}$，得到放行请求的时刻$t_e=t_p+\Delta t$，四个时间可以用下图表示
@@ -405,7 +411,9 @@ public class FlowRuleChecker {
 
     * 如果$t_e > t_n$：说明$t_n-t_p<\Delta t$，空闲的时间间隔无法处理新到来请求，需要等待$t_n$增大，等待时间为$t_p+\Delta t-t_n$，如果等待时间超限，则直接放弃。
     * 如果$t_e \leq  t_n$​：说明$t_n-t_p\ t_c$，空闲的时间间隔能够处理新到来请求，不需等待。
-    
+
+
+#### 实现
 
 * 在实现细节上：
 
@@ -463,6 +471,8 @@ public class RateLimiterController implements TrafficShapingController {
 
 ### 令牌桶限流
 
+#### 原理
+
 * 令牌桶算法中按照设定速率往令牌桶中加入令牌，请求如果能获得令牌则放行，否则拒绝。相较于漏桶算法，因为令牌桶中会有过往的令牌，能允许短时间内通过比阈值更大的流量，能更好的应对抖动的突发流量。
 
 * 在实际系统中，当服务未达到一个稳定状态时，即仍在初始化时，服务的承载能力可能会远低于稳定状态，所以需要预热，让处理请求的数量缓缓增多。此时传统的令牌桶算法，当系统之前请求数较少，令牌桶中堆积大量令牌，此时突发大量请求，因为令牌桶中会有过往的令牌，能允许短时间内通过比阈值更大的流量，此时系统可能面临极大的压力，所以需要控制系统由空闲转为繁忙时，放行的请求数。
@@ -518,6 +528,8 @@ public class RateLimiterController implements TrafficShapingController {
 $$
 wcount=\frac{1}{(ps-tps)\times k+1/count}
 $$
+
+#### 实现
 
 * 根据上述分析，`WarmUpController`的初始化参数与上述公式一致。
 
@@ -648,6 +660,8 @@ public class StatisticSlot extends AbstractLinkedProcessorSlot<DefaultNode> {
 
 ## 熔断实现
 
+### 熔断检查
+
 * 熔断功能由`DegradeSlot`实现，先获取该资源对应的全部断路器，再将请求依次通过全部断路器。
 
 ```java
@@ -731,6 +745,8 @@ public abstract class AbstractCircuitBreaker implements CircuitBreaker {
     }
 }
 ```
+
+### 熔断后置处理
 
 * `DegradeSlot`在退出时，调用`CircuitBreaker#onRequestComplete`方法，获取请求执行结果，更新统计数据，并更新断路器状态。
 
