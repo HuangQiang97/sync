@@ -487,43 +487,47 @@ public class RateLimiterController implements TrafficShapingController {
 
   
 
-* 预热阈值`tps`的定义为：令牌数从`Max Permits`减少到0这个过程中，期望在稳定状态下的时间是总时间的 `1/cf`。对于曲线`Stored Permits-Throtting Time`，如果在横轴上取长为$\Delta permits$的区间，假设其长度极短，其与曲线取围成的图形可近似为矩形，矩形面积为$\Delta permits\times intercal=\Delta permits\times 1/QPS=\Delta t$，即围成面积为时间。
-
+* 预热阈值`tps`的定义为：令牌数从`Max Permits`减少到0这个过程中，期望在稳定状态下的时间是总时间的 `1/cf`。对于曲线`Stored Permits-Throtting Time`，如果在横轴上取长为$\Delta permits$的区间，假设其长度极短，其与曲线取围成的图形可近似为矩形，矩形面积为
+  $$
+  \Delta permits\times interval=\Delta permits\times 1/QPS=\Delta t
+  $$
+  即围成面积为时间。
+  
   则稳定阶段时长：
   $$
   sp=tps\times1/count
   $$
   
-
+  
   根据定义得到：
   $$
   \frac{sp}{sp+wp}=\frac{1}{cf}
   $$
   
-
+  
   求解得到预热开启阈值：
   $$
   tps=\frac{wp\times count}{cf-1}
   $$
   
-
+  
   预热阶段的时长：
   $$
   wp=\frac{(1/count+cf/count)\times(mps-tps)}{2}
   $$
   
-
+  
   求解得到最大堆积令牌数：
   $$
   mps=tps+\frac{2wp}{1/count+cf/count}
   $$
   
-
+  
   在预热阶段，令牌生成间隔与堆积令牌数曲线的斜率等于预热开始与终止时，令牌生成时间间隔之差除以预热开始与终止时令牌堆积数之差
   $$
   k=\frac{ci-si}{mps-tps}=\frac{cf-1}{count\times (mps-tps)}
   $$
-
+  
   得到预热阶段令牌生成速率`wcount`与当前堆积令牌数`ps`的关系
 $$
 wcount=\frac{1}{(ps-tps)\times k+1/count}
