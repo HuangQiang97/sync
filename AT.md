@@ -1,0 +1,11 @@
+io.spring-boot-starter下spring.factories
+
+```java
+# Auto Configure
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+io.seata.spring.boot.autoconfigure.SeataAutoConfiguration,\
+io.seata.spring.boot.autoconfigure.SeataDataSourceAutoConfiguration,\
+io.seata.spring.boot.autoconfigure.SeataHttpAutoConfiguration,\
+io.seata.spring.boot.autoconfigure.SeataSagaAutoConfiguration
+```
+
