@@ -10,9 +10,7 @@
 
 * 执行分布式事务时：->`TM`向`TC`请求发起（Begin）、提交（Commit）、回滚（Rollback）全局事务；->`TM`把代表全局事务的`XID`绑定到分支事务上；->`RM`向`TC`注册，把分支事务关联到`XID`代表的全局事务中；->`RM`把分支事务的执行结果上报给`TC`；->`TM`结束分布式事务，事务一阶段结束，`TM`通知`TC`提交/回滚分布式事务；->`TC`汇总事务信息，决定分布式事务是提交还是回滚；->`TC`通知所有`RM`提交/回滚资源，事务二阶段结束；
 
-### AT
-
-#### 概述
+### AT概述
 
 * AT属于无侵入的分布式事务解决方案，为两阶段提交的变种。
 
@@ -44,7 +42,9 @@
 
 <img src="./assets/webp-1724587041953-49.webp" alt="img" style="zoom:57%;" /><img src="./assets/webp-1724587050361-52.png" alt="img" style="zoom:60%;" />
 
-#### 启动配置
+## AT实现
+
+### 启动配置
 
 * `seata`启动依赖自动配置类。在`io.seata-spring-boot-starter`下的`spring.factories`中包含以下启动配置类
 
@@ -57,7 +57,99 @@
 
     用于配置全局事务扫描器`GlobalTransactionScanner`用于`TM, MC`实例化数据源代理`SeataAutoDataSourceProxyCreator`用于拦截业务操作，生成`boforeImage, afterImage`，保证分布式事务的持久化和可回滚特性。
 
-##### TM初始化
+### 数据源代理
+
+* `SeataDataSourceAutoConfiguration`自动配置类中实例化了`SeataAutoDataSourceProxyCreator`，`SeataAutoDataSourceProxyCreator`继承了`AbstractAutoProxyCreator`，通过`AOP`方式把目标对象转换成代理对象的后置处理器。即`SeataAutoDataSourceProxyCreator`实现为数据源对象创建代理。
+
+```java
+public class SeataAutoDataSourceProxyCreator extends AbstractAutoProxyCreator {
+    private final Object[] advisors;
+    
+    private Object[] buildAdvisors(String dataSourceProxyMode) {
+        Advice advice = new SeataAutoDataSourceProxyAdvice(dataSourceProxyMode);
+        return new Object[]{new DefaultIntroductionAdvisor(advice)};
+    }
+
+    @Override
+    protected boolean shouldSkip(Class<?> beanClass, String beanName) {
+        if (excludes.contains(beanClass.getName())) {
+            return true;
+        }
+        return SeataProxy.class.isAssignableFrom(beanClass);
+    }
+}
+```
+
+* `SeataAutoDataSourceProxyAdvice`用于拦截原始数据源的方法调用，具体的在`invoke`方法中通过反射使用代理对象执行方法调用，添加自身逻辑。
+
+```java
+public class SeataAutoDataSourceProxyAdvice implements MethodInterceptor, IntroductionInfo {
+    // 拦截原始数据源方法调用，将原始数据源替换为代理数据源
+    public Object invoke(MethodInvocation invocation) throws Throwable {
+		// 方法执行的基本信息
+        Method method = invocation.getMethod();
+        String name = method.getName();
+        Class<?>[] parameterTypes = method.getParameterTypes();
+        declared = DataSource.class.getDeclaredMethod(name, parameterTypes);
+        // 将原始数据源替换为代理数据源
+        DataSource origin = (DataSource) invocation.getThis();
+        SeataDataSourceProxy proxy = DataSourceProxyHolder.get(origin);
+        Object[] args = invocation.getArguments();
+        // 使用代理数据源执行方法调用
+        return declared.invoke(proxy, args);
+    }
+}
+```
+
+* 数据源代理对象`SeataDataSourceProxy`的构建由`SeataAutoDataSourceProxyCreator`的父类`AbstractAutoProxyCreator`触发，由于`AbstractAutoProxyCreator`实现`SmartInstantiationAwareBeanPostProcessor`接口，`postProcessAfterInitialization`方法将会被自动执行，从而触发`SeataAutoDataSourceProxyCreator#buildProxy`执行。
+
+    `buildProxy`中根据当前分布式事务方案选择不同的`SeataDataSourceProxy`。由于`TCC, Saga`通过有侵入方式执行分布式事务，由人工控制事务回滚，不要数据源代理。只有`TA, XA`方案需要数据源代理。
+
+```java
+public class SeataAutoDataSourceProxyCreator extends AbstractAutoProxyCreator {
+    SeataDataSourceProxy buildProxy(DataSource origin, String proxyMode) {
+        // 为AT方案生成代理
+        if (BranchType.AT.name().equalsIgnoreCase(proxyMode)) {
+            return new DataSourceProxy(origin);
+        }
+        // 为XA方案生成数据源代理
+        if (BranchType.XA.name().equalsIgnoreCase(proxyMode)) {
+            return new DataSourceProxyXA(origin);
+        }
+        throw new IllegalArgumentException("Unknown dataSourceProxyMode: " + proxyMode);
+    }
+}
+```
+
+### 连接代理
+
+* 数据源代理对象根据传递的原始数据源，获得原始数据源的连接对象，并得到代理的连接对象`ConnectionProxyXA, ConnectionProxyXA`，由他们实现提交本地事务前获取全局行锁，提交事务时生成并写入`undolog`、最后提交本地事务等操作。
+
+```java
+public class ConnectionProxy extends AbstractConnectionProxy {
+    public void commit() throws SQLException {
+        // 提交本地事务前需要获取全局行锁
+        lockRetryPolicy.execute(() -> {
+            doCommit();
+            return null;
+        });
+    }
+    private void processGlobalTransactionCommit() throws SQLException {
+        // 向RM注册
+        register();
+        // 生成并写入undolog
+        UndoLogManagerFactory.getUndoLogManager(this.getDbType()).flushUndoLogs(this);
+        // 向原始数据源写入数据
+        targetConnection.commit();
+        if (IS_REPORT_SUCCESS_ENABLE) {
+            report(true);
+        }
+        context.reset();
+    }
+}
+```
+
+### TM初始化
 
 * 全局事务扫描器`GlobalTransactionScanner`实现了`InitializingBean`接口，将有`spring`自动调用`afterPropertiesSet`完成`initClient`调用，从而完成`RM, TM`初始化，初始化的参数来自`application.yml`。
 
@@ -114,55 +206,249 @@ public final class TmNettyRemotingClient extends AbstractNettyRemotingClient {
 }
 ```
 
-##### RM初始化
+### RM初始化
 
-* `RM`控制分支事务，负责分支注册、状态汇报，并接收`TC`的指令，驱动本地事务的提交和回滚。
+* `RM`控制分支事务，负责分支注册、状态汇报，并接收`TC`的指令，驱动本地事务的提交和回滚。由于`RM`需要与本地数据库交互，同时接收`TC`指令，完成分布式事务的提交或者回滚，`TM`需要设置资源管理器`DefaultResourceManager`和分布式事务指令处理器`DefaultRMHandler`。
+
+    `RM`的初始化和`TM`类似，实例对象通过`RmNettyRemotingClient#getInstance`获得。获取时使用双检查模式，保证每个节点只存在一个`RM`。同时内部持有一个线程池，用于处理与`TC, TM`之间的`RPC`通信，详见`RmNettyRemotingClient#getInstance`。
+
+    初始化`RM`时，根据`service_group`得到`cluster_name`，从注册中心(例如`Nacos`)获得`TC`地址，建立与`TC`之间的连接，并注册自身，`TC`地址通过注册中心(例如`Nacos`)获得，此时同样使用双检查，避免重复连接，详见`NettyClientChannelManager#reconnect`。
 
     ```java
     public class RMClient {
-    
-        /**
-         * Init.
-         *
-         * @param applicationId           the application id
-         * @param transactionServiceGroup the transaction service group
-         */
         public static void init(String applicationId, String transactionServiceGroup) {
+            // 初始化
             RmNettyRemotingClient rmNettyRemotingClient = RmNettyRemotingClient.getInstance(applicationId, transactionServiceGroup);
+            // 设置资源管理器，与本地数据库交互
             rmNettyRemotingClient.setResourceManager(DefaultResourceManager.get());
+            // 布式事务指令处理器,完成分布式事务的提交或者回滚
             rmNettyRemotingClient.setTransactionMessageHandler(DefaultRMHandler.get());
             rmNettyRemotingClient.init();
         }
+    }
     ```
 
-    
 
-    `RM`的初始化和`TM`类似，实例对象通过`RmNettyRemotingClient#getInstance`获得。获取时使用双检查模式，保证每个节点只存在一个`RM`。同时内部持有一个线程池，用于处理与`TC, TM`之间的`RPC`通信。
+#### RM适配
+
+* `DefaultResourceManager`属于适配器，适配所有分布式事务方案(`AT, TCC, SAGA, XA`)下的`RM`调用，内部持有真正的`RM`用于执行真正的方法调用。
 
 ```java
-public final class RmNettyRemotingClient extends AbstractNettyRemotingClient {    
-public static RmNettyRemotingClient getInstance() {
-        // 双检查模式，保证每个节点只存在一个`RM`
-        if (instance == null) {
-            synchronized (RmNettyRemotingClient.class) {
-                if (instance == null) {
-                    NettyClientConfig nettyClientConfig = new NettyClientConfig();
-                    // 一个线程池，用于处理与`TC, TM`之间的`RPC`通信
-                    final ThreadPoolExecutor messageExecutor = new ThreadPoolExecutor(
-                        nettyClientConfig.getClientWorkerThreads(), nettyClientConfig.getClientWorkerThreads(),
-                        KEEP_ALIVE_TIME, TimeUnit.SECONDS, new LinkedBlockingQueue<>(MAX_QUEUE_SIZE),
-                        new NamedThreadFactory(nettyClientConfig.getRmDispatchThreadPrefix(),
-                            nettyClientConfig.getClientWorkerThreads()), new ThreadPoolExecutor.CallerRunsPolicy());
-                    instance = new RmNettyRemotingClient(nettyClientConfig, null, messageExecutor);
-                }
-            }
-        }
-        return instance;
+public class DefaultResourceManager implements ResourceManager {
+    // 持有真正的RM对象
+    protected static Map<BranchType, ResourceManager> resourceManagers
+        = new ConcurrentHashMap<>();
+	// 向TC注册本地分支
+    public Long branchRegister(BranchType branchType, String resourceId,
+                               String clientId, String xid, String applicationData, String lockKeys){
+        return getResourceManager(branchType).branchRegister(branchType, resourceId, clientId, xid, applicationData,
+            lockKeys);
+    }
+	// 向TC汇报本地事务执行状况
+    public void branchReport(BranchType branchType, String xid, long branchId, BranchStatus status,
+                             String applicationData){
+        getResourceManager(branchType).branchReport(branchType, xid, branchId, status, applicationData);
+    }
+    // 接收TC指令提交分布式事务
+    public BranchStatus branchCommit(BranchType branchType, String xid, long branchId,
+                                     String resourceId, String applicationData){
+        return getResourceManager(branchType).branchCommit(branchType, xid, branchId, resourceId, applicationData);
+    }
+	// 接收TC指令回滚分布式事务
+    public BranchStatus branchRollback(BranchType branchType, String xid, long branchId,
+                                       String resourceId, String applicationData){
+        return getResourceManager(branchType).branchRollback(branchType, xid, branchId, resourceId, applicationData);
     }
 }
 ```
 
+##### 二阶段提交
 
+* `ResourceManager`主要有四种实现类：`DataSourceManager, ResourceManagerXA, SagaResourceManager, TCCResourceManager`，分别对应于`AT, XA, Saga, TCC`这四种分布式事务方案。四个具体的`RM`都继承自`AbstractResourceManager`，此处使用模板模式，`AbstractResourceManager`实现了向TC注册和汇报的方法，由于各个分布式方案的提交与回滚方式不一致，提交与回滚方法由具体`RM`实现。
+
+    注册时携带分支的`xid`, `resourceId`, 分布式事务方案类型, 行锁注册到TC，获得分支ID。如果行锁指定的记录被其他分布式事务锁定，将注册失败，等待后续重试。
+
+```java
+public abstract class AbstractResourceManager implements ResourceManager {
+    // 携带分支的xid, resourceId, 分布式事务方案类型, 行锁注册到TC，获得分支ID
+    public Long branchRegister(BranchType branchType, String resourceId, String clientId, String xid, String applicationData, String lockKeys) throws TransactionException {
+            BranchRegisterRequest request = new BranchRegisterRequest();
+            request.setXid(xid);
+        	// 行锁指定的记录被其他分布式事务锁定，将注册失败，等待后续重试
+            request.setLockKey(lockKeys);
+            request.setResourceId(resourceId);
+            request.setBranchType(branchType);
+            request.setApplicationData(applicationData);
+            BranchRegisterResponse response = (BranchRegisterResponse) RmNettyRemotingClient.getInstance().sendSyncRequest(request);
+            return response.getBranchId();
+    }
+	// 携带分支的xid, 分支ID, 本地事务执行状态向TC汇报
+    public void branchReport(BranchType branchType, String xid, long branchId, BranchStatus status, String applicationData) throws TransactionException {
+            BranchReportRequest request = new BranchReportRequest();
+            request.setXid(xid);
+            request.setBranchId(branchId);
+            request.setStatus(status);
+            request.setApplicationData(applicationData);
+            BranchReportResponse response = (BranchReportResponse) RmNettyRemotingClient.getInstance().sendSyncRequest(request);
+    }
+}
+```
+
+* 以实现`AT`方案的`DataSourceManager`为例，继承自`AbstractResourceManager`，实现自己的执行本地事务、提交与回滚分布式事务的方法。
+
+* 在向`TC`汇报本地事务执行成功前，需要根据数据库表名和主键值生成`lockKeys`，用于标识需要锁定的数据库记录，通过`lockQuery`向`TC`发起获取数据库记录全局锁请求，如果成功这本地事务上报为成功，否则证明记录被其他尚未提交分布式事务占有，获取全局锁失败，进入等待重试阶段。
+
+```java
+public class DataSourceManager extends AbstractResourceManager {
+    // 在TC处尝试获取全局记录锁，锁定要修改记录
+    public boolean lockQuery(BranchType branchType, String resourceId, String xid, String lockKeys){
+        GlobalLockQueryRequest request = new GlobalLockQueryRequest();
+        request.setXid(xid);
+        // 根据数据库表名和主键值生成`lockKeys`，用于标识需要锁定的数据库记录
+        request.setLockKey(lockKeys);
+        request.setResourceId(resourceId);
+        GlobalLockQueryResponse response;
+        response = (GlobalLockQueryResponse) RmNettyRemotingClient.getInstance().sendSyncRequest(request);
+        return response.isLockable();
+    }
+}
+```
+
+* 通过`branchCommit`提交分布式事务时，由于本地事务已提交，数据已被持久化修改，立即释放相关记录的全局锁，把提交请求放入一个异步任务的队列中，马上返回提交成功的结果给`TC`。异步队列中的提交请求真正执行时，只是删除相应`UNDOLOG`和行锁，可以快速完成。
+
+![图片4.png](./assets/12-fb7571a44266fa4692599f2907e93125.png)
+
+```java
+public class DataSourceManager extends AbstractResourceManager {    
+    private final AsyncWorker asyncWorker = new AsyncWorker(this);
+    // 接受TC指令，提交分布式事务
+    public BranchStatus branchCommit(BranchType branchType, String xid, long branchId, String resourceId,  String applicationData){
+        // 提交任务至任务队列，异步执行
+        return asyncWorker.branchCommit(xid, branchId, resourceId);
+    }
+}
+```
+
+* `AsyncWorker`为异步任务执行者，内部持有柱塞式任务队列`BlockingQueue`，提交的分布式事务加入柱塞队列，并通过`ScheduledExecutorService`，每隔1s从队列中取出要提交的事务，`undoLogManager`根据`xid, branchid`生成删除`undolog`的sql语句,并通过`DataSourceProxy`执行sql，批量删除`undolog`，完成分布式事务的提交。
+
+```java
+public class AsyncWorker {
+    // 柱塞式任务队列，任务直接加入队列即返回
+    private final BlockingQueue<Phase2Context> commitQueue;
+	// 定时任务消费任务队列中任务，完成批量提交分布式事务
+    private final ScheduledExecutorService scheduledExecutor;
+
+    public AsyncWorker(DataSourceManager dataSourceManager) {
+        this.dataSourceManager = dataSourceManager;
+        commitQueue = new LinkedBlockingQueue<>(ASYNC_COMMIT_BUFFER_LIMIT);
+        ThreadFactory threadFactory = new NamedThreadFactory("AsyncWorker", 2, true);
+        scheduledExecutor = new ScheduledThreadPoolExecutor(2, threadFactory);
+        // 定时任务每隔1s执行一次
+        scheduledExecutor.scheduleAtFixedRate(this::doBranchCommitSafely, 10, 1000, TimeUnit.MILLISECONDS);
+    }
+    
+	// DataSourceManager提交分布式事务时，加入队列即返回，任务异步执行
+    public BranchStatus branchCommit(String xid, long branchId, String resourceId) {
+        Phase2Context context = new Phase2Context(xid, branchId, resourceId);
+        addToCommitQueue(context);
+        return BranchStatus.PhaseTwo_Committed;
+    }
+
+    // 固定延迟调度消费任务队列中任务
+    private void dealWithGroupedContexts(String resourceId, List<Phase2Context> contexts) {
+        // DataSourceProxy为数据源代理，实现undolog的生成、提交、删除，undolog的操作交与 DataSourceProxy执行
+        DataSourceProxy dataSourceProxy = dataSourceManager.get(resourceId);
+        Connection conn = null;
+        conn = dataSourceProxy.getPlainConnection();
+        UndoLogManager undoLogManager = UndoLogManagerFactory.getUndoLogManager(dataSourceProxy.getDbType());
+        // 任务任务分为多个组，每组长为1000
+        List<List<Phase2Context>> splitByLimit = Lists.partition(contexts, UNDOLOG_DELETE_LIMIT_SIZE);
+        for (List<Phase2Context> partition : splitByLimit) {
+            // undoLogManager根据xid, branchid生成删除undolog的sql语句
+            // 并通过conn.prepareStatement执行sql，批量删除undolog
+            deleteUndoLog(conn, undoLogManager, partition);
+        IOUtil.close(conn);
+    }
+}
+```
+
+##### 二阶段回滚
+
+* 通过`branchRollback`回滚分布式事务时，需要回滚一阶段已经执行的业务SQL，还原业务数据。`RM`通过`XID`找到对应的`undolog`回滚日志。首先校验脏写，对比数据库当前业务数据和`afterimage`，如果两份数据完全一致就说明没有脏写，可以还原业务数据，生成并执行回滚的语句；如果不一致就说明有脏写，需要额外处理。最后用`beforeimage`还原业务数据，并删除`undolog`日志，释放全局锁。
+
+![图片5.png](./assets/13-67b42e8743563de3117194847e4119de.png)
+
+```java
+public class DataSourceManager extends AbstractResourceManager {  
+    private final Map<String, Resource> dataSourceCache = new ConcurrentHashMap<>();
+    // 接受TC指令，混滚分布式事务
+    public BranchStatus branchRollback(BranchType branchType, String xid, long branchId, String resourceId, String applicationData) throws TransactionException {
+        DataSourceProxy dataSourceProxy = get(resourceId);
+ UndoLogManagerFactory.getUndoLogManager(dataSourceProxy.getDbType()).undo(dataSourceProxy, xid, branchId);
+        return BranchStatus.PhaseTwo_Rollbacked;
+    }
+}
+```
+
+#### 指令Handler
+
+* `RM`的`DefaultRMHandler`设置和`ResourceManager`的设置类似。`DefaultRMHandler`属于适配器，适配所有分布式事务方案(`AT, TCC, SAGA, XA`)下`TC`发送的`RPC`通信调用处理，内部持有真正的`RMHandler`用于处理`TC`发送的提交或者回滚分布式事务`RPC`指令。
+
+```java
+public class DefaultRMHandler extends AbstractRMHandler {
+	// 存储`AT, TCC, SAGA, XA`下处理`TC`发送的`RPC`通信调用的Handler
+    protected static Map<BranchType, AbstractRMHandler> allRMHandlersMap = new ConcurrentHashMap<>();
+
+    // 收到TC提交指令时，委托当前事务模式下真正的Handler完成事务提交
+    public BranchCommitResponse handle(BranchCommitRequest request) {
+        return getRMHandler(request.getBranchType()).handle(request);
+    }
+
+    // 收到TC回滚指令时，委托当前事务模式下真正的Handler完成事务回滚
+    public BranchRollbackResponse handle(BranchRollbackRequest request) {
+        return getRMHandler(request.getBranchType()).handle(request);
+    }
+```
+
+- `AbstractRMHandler`主要有四种实现类：`RMHandlerAT, RMHandlerXA, RMHandlerSaga, RMHandlerTCC`，分别对应于`AT, XA, Saga, TCC`这四种分布式事务方案。四个具体的`RM`都继承自`AbstractRMHandler`，此处使用模板模式，`AbstractRMHandler`实现了处理`TC`发送的提交或者回滚分布式事务指令的方法。无论是提交还是回滚都将请求转发给当前分布式事务方案下的`RM`，完成`undolog`的删除或者根据`undolog`还原本地数据。
+
+```java
+public abstract class AbstractRMHandler extends AbstractExceptionHandler
+    implements RMInboundHandler, TransactionMessageHandler {
+
+    // 处理TC发送的提交分布式事务请求
+    public BranchCommitResponse handle(BranchCommitRequest request) {
+        BranchCommitResponse response = new BranchCommitResponse();
+        exceptionHandleTemplate(new AbstractCallback<BranchCommitRequest, BranchCommitResponse>() {
+            @Override
+            public void execute(BranchCommitRequest request, BranchCommitResponse response)
+                throws TransactionException {
+                // 触发对应分布式事务方案下ResourceManager#branchRollback执行，委托RM完成事务提交
+                doBranchCommit(request, response);
+            }
+        }, request, response);
+        return response;
+    }
+
+    // 处理TC发送的回滚分布式事务请求
+    public BranchRollbackResponse handle(BranchRollbackRequest request) {
+        BranchRollbackResponse response = new BranchRollbackResponse();
+        exceptionHandleTemplate(new AbstractCallback<BranchRollbackRequest, BranchRollbackResponse>() {
+            @Override
+            public void execute(BranchRollbackRequest request, BranchRollbackResponse response)
+                throws TransactionException {
+                // 触发对应分布式事务方案下ResourceManager#branchRollback执行，委托RM完成事务回滚
+                doBranchRollback(request, response);
+            }
+        }, request, response);
+        return response;
+    }
+}
+```
+
+### 全局事务拦截
+
+* 
 
 ### TCC
 
