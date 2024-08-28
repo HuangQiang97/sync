@@ -8,7 +8,7 @@
 
 <img src="./assets/TB19qmhOrY1gK0jSZTEXXXDQVXa-1330-924.png" alt="seata-mod" style="zoom: 40%;" />
 
-* 执行分布式事务时：->`TM`向`TC`请求发起（Begin）、提交（Commit）、回滚（Rollback）全局事务；->`TM`把代表全局事务的`XID`绑定到分支事务上；->`RM`向`TC`注册，把分支事务关联到`XID`代表的全局事务中；->`RM`把分支事务的执行结果上报给`TC`；->`TM`结束分布式事务，事务一阶段结束，`TM`通知`TC`提交/回滚分布式事务；->`TC`汇总事务信息，决定分布式事务是提交还是回滚；->`TC`通知所有`RM`提交/回滚资源，事务二阶段结束；
+* 执行分布式事务时：->`TM`向`TC`请求发起（Begin）、提交（Commit）、回滚（Rollback）全局事务；->`TM`把代表全局事务的`XID`绑定到分支事务上；->`RM`向`TC`注册，把分支事务关联到`XID`代表的全局事务中；->`RM`把分支事务的执行结果上报给`TC`（可选，默认关闭）；->`TM`结束分布式事务，事务一阶段结束，`TM`通知`TC`提交/回滚分布式事务；->`TC`汇总事务信息，决定分布式事务是提交还是回滚；->`TC`通知所有`RM`提交/回滚资源，事务二阶段结束；
 
 ### AT概述
 
@@ -59,6 +59,10 @@
 
 ### 数据源代理
 
+`Seata`为与数据源相关的组件构建包装类`DataSourceProxy, ConnectionProxy, StatementProxy, PreparedStatementProxy`，用于在 SQL 语句执行前后、事务 commit 或者 rollback 前后进行与分布式事务相关的操作，例如分支注册、状态上报、全局锁生成、全局锁查询、快照存储、反向SQL生成等。
+
+![img](./assets/aHR0cDovL3d3MS5zaW5haW1nLmNuL2xhcmdlL2MzYmViODk1Z3kxZzRuMzMzYmhvcWoyMDliMDkyYWE3LmpwZw-1724866351109-3)
+
 * `SeataDataSourceAutoConfiguration`自动配置类中实例化了`SeataAutoDataSourceProxyCreator`，`SeataAutoDataSourceProxyCreator`继承了`AbstractAutoProxyCreator`，通过`AOP`方式把目标对象转换成代理对象的后置处理器。即`SeataAutoDataSourceProxyCreator`实现为数据源对象创建代理。
 
 ```java
@@ -101,7 +105,7 @@ public class SeataAutoDataSourceProxyAdvice implements MethodInterceptor, Introd
 }
 ```
 
-* 数据源代理对象`SeataDataSourceProxy`的构建由`SeataAutoDataSourceProxyCreator`的父类`AbstractAutoProxyCreator`触发，由于`AbstractAutoProxyCreator`实现`SmartInstantiationAwareBeanPostProcessor`接口，`postProcessAfterInitialization`方法将会被自动执行，从而触发`SeataAutoDataSourceProxyCreator#buildProxy`执行。
+* 数据源代理对象`SeataDataSourceProxy`的构建由`SeataAutoDataSourceProxyCreator`的父类`AbstractAutoProxyCreator`触发，由于`AbstractAutoProxyCreator`实现`SmartInstantiationAwareBeanPostProcessor`接口，`postProcessAfterInitialization`方法将会被自动执行，从而触发`SeataAutoDataSourceProxyCreator#buildProxy`执行，之后`dataSource.getConnection`获得的对象是 `ConnectionProxy `对象。
 
     `buildProxy`中根据当前分布式事务方案选择不同的`SeataDataSourceProxy`。由于`TCC, Saga`通过有侵入方式执行分布式事务，由人工控制事务回滚，不要数据源代理。只有`TA, XA`方案需要数据源代理。
 
@@ -123,31 +127,149 @@ public class SeataAutoDataSourceProxyCreator extends AbstractAutoProxyCreator {
 
 ### 连接代理
 
-* 数据源代理对象根据传递的原始数据源，获得原始数据源的连接对象，并得到代理的连接对象`ConnectionProxyXA, ConnectionProxyXA`，由他们实现提交本地事务前获取全局行锁，提交事务时生成并写入`undolog`、最后提交本地事务等操作。
+* 数据源代理对象根据传递的原始数据源，获得原始数据源的连接对象，并得到代理的连接对象`ConnectionProxyXA, ConnectionProxyXA`，代理`commit`方法，实现提交本地事务前获取行锁，之后根据被拦截方法备注类型执行不同调用。
+
+    如果使用`@GlobalTransaction`注解，将会开启分布式事务，调用`processGlobalTransactionCommit`完成提交事务时生成并写入`undolog`、最后提交本地事务，将业务修改和`UndoLog`一并提交。
+
+    如果使用`@GlobalLock`注解，说明该方法并非某个全局事务下的分支事务，希望某个不在全局事务下的操作不影响分布式事务。此时对数据资源的操作也需要先查询全局锁，如果存在其全局事务正在修改，则该方法也需等待，以在分布式事务下防止脏读。此时将调用`processLocalCommitWithGlobalLocks`，通过`RM`完成全局锁获取，获取成功后再提交本地事务，获取失败则进入等待重试阶段。
 
 ```java
 public class ConnectionProxy extends AbstractConnectionProxy {
     public void commit() throws SQLException {
-        // 提交本地事务前需要获取全局行锁
+        // 提交本地事务前需要获取行锁
         lockRetryPolicy.execute(() -> {
             doCommit();
             return null;
         });
     }
+    
+    private void doCommit() throws SQLException {
+        // 根据事务添加注解不同有不同处理方式
+        if (context.inGlobalTransaction()) {
+            // 使用@GlobalTransaction注解修饰方法
+            processGlobalTransactionCommit();
+        } else if (context.isGlobalLockRequire()) {
+            // 使用@GlobalLock注解修饰方法
+            processLocalCommitWithGlobalLocks();
+        } else {
+            targetConnection.commit();
+        }
+    }
+    
     private void processGlobalTransactionCommit() throws SQLException {
-        // 向RM注册
+        // 调用RM#branchRegister注册分支事务，获得branchid
         register();
-        // 生成并写入undolog
+        // 刷新写入undolog
         UndoLogManagerFactory.getUndoLogManager(this.getDbType()).flushUndoLogs(this);
-        // 向原始数据源写入数据
+        // 向原始数据源写入数据，将业务修改和UndoLog一并提交
         targetConnection.commit();
+        // 是否报告一阶段提交完成，默认为false
         if (IS_REPORT_SUCCESS_ENABLE) {
+            // 通过RM#branchReport向TC汇报分支状态为一阶段成功 
             report(true);
+        }
+        context.reset();
+    }
+    
+    private void processLocalCommitWithGlobalLocks() throws SQLException {
+        // 尝试获取全局锁，在分布式事务下防止脏读
+        checkLock(context.buildLockKeys());
+        try {
+            // 不存在占据当前行的分布式事务，则提交本地事务
+            targetConnection.commit();
+        } catch (Throwable ex) {
+            throw new SQLException(ex);
         }
         context.reset();
     }
 }
 ```
+
+### 执行代理
+
+<img src="./assets/aHR0cDovL3d3MS5zaW5haW1nLmNuL2xhcmdlL2MzYmViODk1Z3kxZzRseGllaTN3ZWoyMG5uMDdoM3l3LmpwZw.jpeg" alt="img" style="zoom:70%;" />
+
+* 当通过连接代理`conn.prepareStatement`获得`PreparedStatement`时同样返回生成的代理实现`PreparedStatementProxy`，`connection.prepareStatement`获得的是`PreparedStatementProxy` 对象。`PreparedStatementProxy#execute`在被调用后完成SQL解析和执行。当使用`PreparedStatementProxy#execute`执行SQL时，将委托`ExecuteTemplate`代为执行。
+
+```java
+public class PreparedStatementProxy extends AbstractPreparedStatementProxy
+    implements PreparedStatement, ParametersHolder {
+    // 委托`ExecuteTemplate`代为执行
+	public boolean execute() throws SQLException {
+        return ExecuteTemplate.execute(this, (statement, args) -> statement.execute());
+    }
+}
+```
+
+* `ExecuteTemplate`根据SQL类型生成具体执行类：`InsertExecutor, SqlServerUpdateExecutor, SqlServerDeleteExecutor, SqlServerSelectForUpdateExecutor`。
+
+```java
+public class ExecuteTemplate {
+   public static <T, S extends Statement> T execute(List<SQLRecognizer> sqlRecognizers,
+                                                     StatementProxy<S> statementProxy,
+                                                     StatementCallback<T, S> statementCallback,
+                                                     Object... args) throws SQLException {
+        Executor<T> executor;
+        SQLRecognizer sqlRecognizer = sqlRecognizers.get(0);
+       // 根据SQL类型生成具体执行类
+        switch (sqlRecognizer.getSQLType()) {
+            case INSERT: getExecutor
+            case UPDATE: getExecutor
+            case DELETE: getExecutor
+            case SELECT_FOR_UPDATE: getExecutor
+        }
+        T rs;
+        // 调用执行器的 execute 方法
+        rs = executor.execute(args);
+        return rs;
+    }
+```
+
+* 此处同样使用了模板模式，上述执行类都继承自`AbstractDMLBaseExecutor`，`AbstractDMLBaseExecutor`实现了`executeAutoCommitFalse`方法，完成SQL执行、`boforeImage, afterImage`、全局锁记录、构建回滚日志对象添加到`ConnectionProxy`上下文，尝试将其和业务修改在同一事务中提交，保证了一阶段操作的原子性。由于不同数据库针对`INSERT、UPDATE、DELETE` 有不同的实现具体，`boforeImage, afterImage`生成由子类具体实现。
+
+    生成全局锁记录时根据表名+主键值生成全局锁，如果是增加或者更改则使用更新后的`afterImage`生成锁记录；如果是删除使用`beforeImage`生成锁记录。生成锁记录放入`connectionProxy`，等待向`TC`发起获取全局锁申请，如果获取成功，则提交本地事务，如果失败进入等待重试。
+
+```java
+public abstract class AbstractDMLBaseExecutor<T, S extends Statement> extends BaseTransactionalExecutor<T, S> {
+    // 执行SQL执行、`boforeImage, afterImage`生成
+    protected T executeAutoCommitFalse(Object[] args) throws Exception {
+        // 执行SQL前生成快照
+        TableRecords beforeImage = beforeImage();
+        // 本地DB执行SQL
+        T result = statementCallback.execute(statementProxy.getTargetStatement(), args);
+        // 执行SQL后生成快照
+        TableRecords afterImage = afterImage(beforeImage);
+        // 整合beforeImage和afterImage，生成undolog插入到代理连接的上下文，用于后续回滚分布式事务
+        prepareUndoLog(beforeImage, afterImage);
+        return result;
+    }
+    
+    // 具体的`boforeImage, afterImage`生成由子类具体实现
+    protected abstract TableRecords beforeImage() throws SQLException;
+    protected abstract TableRecords afterImage(TableRecords beforeImage) throws SQLException;
+    
+    // 准备undolog
+    protected void prepareUndoLog(TableRecords beforeImage, TableRecords afterImage) throws SQLException {
+        ConnectionProxy connectionProxy = statementProxy.getConnectionProxy();
+        // 生成根据表名+主键值生成全局锁
+        // 如果是增加或者更改则使用更新后的afterImage生成锁记录
+        // 如果是删除使用beforeImage生成锁记录
+        TableRecords lockKeyRecords = sqlRecognizer.getSQLType() == SQLType.DELETE ? beforeImage : afterImage;
+        String lockKeys = buildLockKey(lockKeyRecords);
+        if (null != lockKeys) {
+            // 添加lockKey全局记录锁放入`ConnectionProxy`上下文
+            connectionProxy.appendLockKey(lockKeys);
+            // 根据beforeImage, afterImage生成undolog
+            SQLUndoLog sqlUndoLog = buildUndoItem(beforeImage, afterImage);
+            // 将回滚日志添加到`ConnectionProxy`上下文
+            connectionProxy.appendUndoLog(sqlUndoLog);
+        }
+    }
+}
+
+```
+
+<img src="./assets/aHR0cDovL3d3MS5zaW5haW1nLmNuL2xhcmdlL2MzYmViODk1bHkxZzRsbnRmb2k1aWoyMHE1MGw1d2cxLmpwZw.jpeg" alt="img" style="zoom:53%;" />
 
 ### TM初始化
 
@@ -374,7 +496,7 @@ public class AsyncWorker {
 
 ##### 二阶段回滚
 
-* 通过`branchRollback`回滚分布式事务时，需要回滚一阶段已经执行的业务SQL，还原业务数据。`RM`通过`XID`找到对应的`undolog`回滚日志。首先校验脏写，对比数据库当前业务数据和`afterimage`，如果两份数据完全一致就说明没有脏写，可以还原业务数据，生成并执行回滚的语句；如果不一致就说明有脏写，需要额外处理。最后用`beforeimage`还原业务数据，并删除`undolog`日志，释放全局锁。
+* 通过`branchRollback`回滚分布式事务时，需要回滚一阶段已经执行的业务SQL，还原业务数据。`RM`通过`XID`找到对应的`undolog`回滚日志。首先校验脏写，对比数据库当前业务数据和`afterimage`，如果两份数据完全一致就说明没有脏写，可以还原业务数据，生成并执行回滚的语句；如果不一致就说明有脏写，需要额外处理。最后用`beforeimage`还原业务数据，通过`UndoLog`生成反向 `SQL`语句回滚一阶段的数据修改，并删除`undolog`日志，释放全局锁。
 
 ![图片5.png](./assets/13-67b42e8743563de3117194847e4119de.png)
 
@@ -384,6 +506,7 @@ public class DataSourceManager extends AbstractResourceManager {
     // 接受TC指令，混滚分布式事务
     public BranchStatus branchRollback(BranchType branchType, String xid, long branchId, String resourceId, String applicationData) throws TransactionException {
         DataSourceProxy dataSourceProxy = get(resourceId);
+  // 通过 `UndoLog` 生成反向 `SQL` 语句回滚一阶段的数据修改
  UndoLogManagerFactory.getUndoLogManager(dataSourceProxy.getDbType()).undo(dataSourceProxy, xid, branchId);
         return BranchStatus.PhaseTwo_Rollbacked;
     }
@@ -448,7 +571,133 @@ public abstract class AbstractRMHandler extends AbstractExceptionHandler
 
 ### 全局事务拦截
 
-* 
+* 启动配置类`GlobalTransactionScanner`实现了`AbstractAutoProxyCreator`接口，本质上是一个`BeanPostProcessor`，会扫描全部bean，在`bean`初始化之前，调用内部的`postProcessBeforeInstantiation`方法，获取与被代理对象匹配的拦截器，创建AOP代理bean，完成逻辑增强。
+
+```java
+public abstract class AbstractAutoProxyCreator implements SmartInstantiationAwareBeanPostProcessor,
+	// 获取bean匹配拦截器，完成代理对象创建
+	public Object postProcessBeforeInstantiation(Class<?> beanClass, String beanName) {
+		Object cacheKey = getCacheKey(beanClass, beanName);
+		TargetSource targetSource = getCustomTargetSource(beanClass, beanName);
+		if (targetSource != null) {
+			if (StringUtils.hasLength(beanName)) {
+				this.targetSourcedBeans.add(beanName);
+			}
+            // 获取bean匹配拦截器
+			Object[] specificInterceptors = getAdvicesAndAdvisorsForBean(beanClass, beanName, targetSource);
+            // 创建代理对象
+			Object proxy = createProxy(beanClass, beanName, specificInterceptors, targetSource);
+			this.proxyTypes.put(cacheKey, proxy.getClass());
+			return proxy;
+		}
+		return null;
+	}
+}
+```
+
+* 与分布式事务相关的拦截器由`GlobalTransactionScanner#wrapIfNecessary`生成。他将为添加有`@GlobalTransactional`的类创建拦截器`AdapterSpringSeataInterceptor(ProxyInvocationHandler)`。由`ProxyInvocationHandler`真正执行代理拦截。
+
+```java
+public class AdapterSpringSeataInterceptor implements MethodInterceptor, SeataInterceptor, Ordered {
+
+    private ProxyInvocationHandler proxyInvocationHandler;
+	// 拦截器持有proxyInvocationHandler用于拦截DB调用
+    public AdapterSpringSeataInterceptor(ProxyInvocationHandler proxyInvocationHandler) {
+        this.proxyInvocationHandler = proxyInvocationHandler;
+    }
+	// 请求拦截交由proxyInvocationHandler实现
+    public Object invoke(@Nonnull MethodInvocation invocation) throws Throwable {
+        AdapterInvocationWrapper adapterInvocationWrapper = new AdapterInvocationWrapper(invocation);
+        Object result = proxyInvocationHandler.invoke(adapterInvocationWrapper);
+        return result;
+    }
+}
+```
+
+* `ProxyInvocationHandler`通过`GlobalTransactionalInterceptorHandler`代理`doInvoke`方法，拦截带有`GlobalTransactional`注解或者`GlobalLock`注解的方法，构建当前操作事务，交由`handleGlobalTransaction`或者`handleGlobalLock`执行。
+
+    对于`handleGlobalTransaction`由于需要开启新的分布式事务，由模板类`TransactionalTemplate`执行事务方法的反射调用。
+
+```java
+public class GlobalTransactionalInterceptorHandler extends AbstractProxyInvocationHandler implements ConfigurationChangeListener {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(GlobalTransactionalInterceptorHandler.class);
+
+    private final TransactionalTemplate transactionalTemplate = new TransactionalTemplate();
+    private final GlobalLockTemplate globalLockTemplate = new GlobalLockTemplate();
+
+    @Override
+    protected Object doInvoke(InvocationWrapper invocation) throws Throwable {
+        Class<?> targetClass = invocation.getTarget().getClass();
+        // 事务方法信息
+        Method specificMethod = ClassUtils.getMostSpecificMethod(invocation.getMethod(), targetClass);
+        if (specificMethod != null && !specificMethod.getDeclaringClass().equals(Object.class)) {
+            // 拦截带有`GlobalTransactional`注解的方法
+            final GlobalTransactional globalTransactionalAnnotation = getAnnotation(specificMethod, targetClass, GlobalTransactional.class);
+            // 拦截带有`GlobalLock`注解的方法
+            final GlobalLock globalLockAnnotation = getAnnotation(specificMethod, targetClass, GlobalLock.class);
+            // 是否开启分布式事务
+            boolean localDisable = disable || (ATOMIC_DEGRADE_CHECK.get() && degradeNum >= degradeCheckAllowTimes);
+            if (!localDisable) {
+                if (globalTransactionalAnnotation != null || this.aspectTransactional != null) {
+                    // 如果是带有`GlobalTransactional`注解的方法，通过handleGlobalTransaction执行
+                    AspectTransactional transactional=initTransactional()
+                    return handleGlobalTransaction(invocation, transactional);
+                } else if (globalLockAnnotation != null) {
+                    // 如果是带有`GlobalLock`注解的方法，通过handleGlobalLock执行
+                    return handleGlobalLock(invocation, globalLockAnnotation);
+                }
+            }
+        }
+        return invocation.proceed();
+    }
+
+    Object handleGlobalTransaction(final InvocationWrapper methodInvocation,
+                                   final AspectTransactional aspectTransactional) throws Throwable {
+        boolean succeed = true;
+        return transactionalTemplate.execute(new TransactionalExecutor() {
+            @Override
+            public Object execute() throws Throwable {
+                return methodInvocation.proceed();
+            }
+        });
+        
+    }
+}
+
+```
+
+* `TransactionalTemplate`用于在分布式事务下执行本地事务方法，同时向`TC`发起开始、提交、回滚请求。其中与`TC`通信部分由`DefaultGlobalTransaction`实现。业务带来
+
+```java
+public class TransactionalTemplate {
+  public Object execute(TransactionalExecutor business) throws Throwable {
+    // 1. 获取分布式事务
+    GlobalTransaction tx = GlobalTransactionContext.getCurrent();
+    try {
+        // 2. 向TC发起请求开始全局事务
+        beginTransaction(txInfo, tx);
+        Object rs = null;
+        try {
+            // 执行业务逻辑
+            rs = business.execute();
+        } catch (Throwable ex) {
+            // 3.业务逻辑异常，rollback全局事务
+            completeTransactionAfterThrowing(txInfo,tx,ex);
+            throw ex;
+        }
+        // 4. commit全局事务
+        commitTransaction(tx);
+        return rs;
+    } finally {
+        //5. 清理
+        triggerAfterCompletion();
+        cleanUp();
+    }
+}
+```
+
+
 
 ### TCC
 
