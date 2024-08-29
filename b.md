@@ -350,172 +350,9 @@ public final class TmNettyRemotingClient extends AbstractNettyRemotingClient {
     }
     ```
 
-
-#### RM适配
-
-* `DefaultResourceManager`属于适配器，适配所有分布式事务方案(`AT, TCC, SAGA, XA`)下的`RM`调用，内部持有真正的`RM`用于执行真正的方法调用。
-
-```java
-public class DefaultResourceManager implements ResourceManager {
-    // 持有真正的RM对象
-    protected static Map<BranchType, ResourceManager> resourceManagers
-        = new ConcurrentHashMap<>();
-	// 向TC注册本地分支
-    public Long branchRegister(BranchType branchType, String resourceId,
-                               String clientId, String xid, String applicationData, String lockKeys){
-        return getResourceManager(branchType).branchRegister(branchType, resourceId, clientId, xid, applicationData,
-            lockKeys);
-    }
-	// 向TC汇报本地事务执行状况
-    public void branchReport(BranchType branchType, String xid, long branchId, BranchStatus status,
-                             String applicationData){
-        getResourceManager(branchType).branchReport(branchType, xid, branchId, status, applicationData);
-    }
-    // 接收TC指令提交分布式事务
-    public BranchStatus branchCommit(BranchType branchType, String xid, long branchId,
-                                     String resourceId, String applicationData){
-        return getResourceManager(branchType).branchCommit(branchType, xid, branchId, resourceId, applicationData);
-    }
-	// 接收TC指令回滚分布式事务
-    public BranchStatus branchRollback(BranchType branchType, String xid, long branchId,
-                                       String resourceId, String applicationData){
-        return getResourceManager(branchType).branchRollback(branchType, xid, branchId, resourceId, applicationData);
-    }
-}
-```
-
-##### 二阶段提交
-
-* `ResourceManager`主要有四种实现类：`DataSourceManager, ResourceManagerXA, SagaResourceManager, TCCResourceManager`，分别对应于`AT, XA, Saga, TCC`这四种分布式事务方案。四个具体的`RM`都继承自`AbstractResourceManager`，此处使用模板模式，`AbstractResourceManager`实现了向TC注册和汇报的方法，由于各个分布式方案的提交与回滚方式不一致，提交与回滚方法由具体`RM`实现。
-
-    注册时携带分支的`xid`, `resourceId`, 分布式事务方案类型, 行锁注册到TC，获得分支ID。如果行锁指定的记录被其他分布式事务锁定，将注册失败，等待后续重试。
-
-```java
-public abstract class AbstractResourceManager implements ResourceManager {
-    // 携带分支的xid, resourceId, 分布式事务方案类型, 行锁注册到TC，获得分支ID
-    public Long branchRegister(BranchType branchType, String resourceId, String clientId, String xid, String applicationData, String lockKeys) throws TransactionException {
-            BranchRegisterRequest request = new BranchRegisterRequest();
-            request.setXid(xid);
-        	// 行锁指定的记录被其他分布式事务锁定，将注册失败，等待后续重试
-            request.setLockKey(lockKeys);
-            request.setResourceId(resourceId);
-            request.setBranchType(branchType);
-            request.setApplicationData(applicationData);
-            BranchRegisterResponse response = (BranchRegisterResponse) RmNettyRemotingClient.getInstance().sendSyncRequest(request);
-            return response.getBranchId();
-    }
-	// 携带分支的xid, 分支ID, 本地事务执行状态向TC汇报
-    public void branchReport(BranchType branchType, String xid, long branchId, BranchStatus status, String applicationData) throws TransactionException {
-            BranchReportRequest request = new BranchReportRequest();
-            request.setXid(xid);
-            request.setBranchId(branchId);
-            request.setStatus(status);
-            request.setApplicationData(applicationData);
-            BranchReportResponse response = (BranchReportResponse) RmNettyRemotingClient.getInstance().sendSyncRequest(request);
-    }
-}
-```
-
-* 以实现`AT`方案的`DataSourceManager`为例，继承自`AbstractResourceManager`，实现自己的执行本地事务、提交与回滚分布式事务的方法。
-
-* 在向`TC`汇报本地事务执行成功前，需要根据数据库表名和主键值生成`lockKeys`，用于标识需要锁定的数据库记录，通过`lockQuery`向`TC`发起获取数据库记录全局锁请求，如果成功这本地事务上报为成功，否则证明记录被其他尚未提交分布式事务占有，获取全局锁失败，进入等待重试阶段。
-
-```java
-public class DataSourceManager extends AbstractResourceManager {
-    // 在TC处尝试获取全局记录锁，锁定要修改记录
-    public boolean lockQuery(BranchType branchType, String resourceId, String xid, String lockKeys){
-        GlobalLockQueryRequest request = new GlobalLockQueryRequest();
-        request.setXid(xid);
-        // 根据数据库表名和主键值生成`lockKeys`，用于标识需要锁定的数据库记录
-        request.setLockKey(lockKeys);
-        request.setResourceId(resourceId);
-        GlobalLockQueryResponse response;
-        response = (GlobalLockQueryResponse) RmNettyRemotingClient.getInstance().sendSyncRequest(request);
-        return response.isLockable();
-    }
-}
-```
-
-* 通过`branchCommit`提交分布式事务时，由于本地事务已提交，数据已被持久化修改，立即释放相关记录的全局锁，把提交请求放入一个异步任务的队列中，马上返回提交成功的结果给`TC`。异步队列中的提交请求真正执行时，只是删除相应`UNDOLOG`和行锁，可以快速完成。
-
-![图片4.png](./assets/12-fb7571a44266fa4692599f2907e93125.png)
-
-```java
-public class DataSourceManager extends AbstractResourceManager {    
-    private final AsyncWorker asyncWorker = new AsyncWorker(this);
-    // 接受TC指令，提交分布式事务
-    public BranchStatus branchCommit(BranchType branchType, String xid, long branchId, String resourceId,  String applicationData){
-        // 提交任务至任务队列，异步执行
-        return asyncWorker.branchCommit(xid, branchId, resourceId);
-    }
-}
-```
-
-* `AsyncWorker`为异步任务执行者，内部持有柱塞式任务队列`BlockingQueue`，提交的分布式事务加入柱塞队列，并通过`ScheduledExecutorService`，每隔1s从队列中取出要提交的事务，`undoLogManager`根据`xid, branchid`生成删除`undolog`的sql语句,并通过`DataSourceProxy`执行sql，批量删除`undolog`，完成分布式事务的提交。
-
-```java
-public class AsyncWorker {
-    // 柱塞式任务队列，任务直接加入队列即返回
-    private final BlockingQueue<Phase2Context> commitQueue;
-	// 定时任务消费任务队列中任务，完成批量提交分布式事务
-    private final ScheduledExecutorService scheduledExecutor;
-
-    public AsyncWorker(DataSourceManager dataSourceManager) {
-        this.dataSourceManager = dataSourceManager;
-        commitQueue = new LinkedBlockingQueue<>(ASYNC_COMMIT_BUFFER_LIMIT);
-        ThreadFactory threadFactory = new NamedThreadFactory("AsyncWorker", 2, true);
-        scheduledExecutor = new ScheduledThreadPoolExecutor(2, threadFactory);
-        // 定时任务每隔1s执行一次
-        scheduledExecutor.scheduleAtFixedRate(this::doBranchCommitSafely, 10, 1000, TimeUnit.MILLISECONDS);
-    }
-    
-	// DataSourceManager提交分布式事务时，加入队列即返回，任务异步执行
-    public BranchStatus branchCommit(String xid, long branchId, String resourceId) {
-        Phase2Context context = new Phase2Context(xid, branchId, resourceId);
-        addToCommitQueue(context);
-        return BranchStatus.PhaseTwo_Committed;
-    }
-
-    // 固定延迟调度消费任务队列中任务
-    private void dealWithGroupedContexts(String resourceId, List<Phase2Context> contexts) {
-        // DataSourceProxy为数据源代理，实现undolog的生成、提交、删除，undolog的操作交与 DataSourceProxy执行
-        DataSourceProxy dataSourceProxy = dataSourceManager.get(resourceId);
-        Connection conn = null;
-        conn = dataSourceProxy.getPlainConnection();
-        UndoLogManager undoLogManager = UndoLogManagerFactory.getUndoLogManager(dataSourceProxy.getDbType());
-        // 任务任务分为多个组，每组长为1000
-        List<List<Phase2Context>> splitByLimit = Lists.partition(contexts, UNDOLOG_DELETE_LIMIT_SIZE);
-        for (List<Phase2Context> partition : splitByLimit) {
-            // undoLogManager根据xid, branchid生成删除undolog的sql语句
-            // 并通过conn.prepareStatement执行sql，批量删除undolog
-            deleteUndoLog(conn, undoLogManager, partition);
-        IOUtil.close(conn);
-    }
-}
-```
-
-##### 二阶段回滚
-
-* 通过`branchRollback`回滚分布式事务时，需要回滚一阶段已经执行的业务SQL，还原业务数据。`RM`通过`XID`找到对应的`undolog`回滚日志。首先校验脏写，对比数据库当前业务数据和`afterimage`，如果两份数据完全一致就说明没有脏写，可以还原业务数据，生成并执行回滚的语句；如果不一致就说明有脏写，需要额外处理。最后用`beforeimage`还原业务数据，通过`UndoLog`生成反向 `SQL`语句回滚一阶段的数据修改，并删除`undolog`日志，释放全局锁。
-
-![图片5.png](./assets/13-67b42e8743563de3117194847e4119de.png)
-
-```java
-public class DataSourceManager extends AbstractResourceManager {  
-    private final Map<String, Resource> dataSourceCache = new ConcurrentHashMap<>();
-    // 接受TC指令，混滚分布式事务
-    public BranchStatus branchRollback(BranchType branchType, String xid, long branchId, String resourceId, String applicationData) throws TransactionException {
-        DataSourceProxy dataSourceProxy = get(resourceId);
-  // 通过 `UndoLog` 生成反向 `SQL` 语句回滚一阶段的数据修改
- UndoLogManagerFactory.getUndoLogManager(dataSourceProxy.getDbType()).undo(dataSourceProxy, xid, branchId);
-        return BranchStatus.PhaseTwo_Rollbacked;
-    }
-}
-```
-
 #### 指令Handler
 
-* `RM`的`DefaultRMHandler`设置和`ResourceManager`的设置类似。`DefaultRMHandler`属于适配器，适配所有分布式事务方案(`AT, TCC, SAGA, XA`)下`TC`发送的`RPC`通信调用处理，内部持有真正的`RMHandler`用于处理`TC`发送的提交或者回滚分布式事务`RPC`指令。
+* `RM`的`DefaultRMHandler`属于适配器，适配所有分布式事务方案(`AT, TCC, SAGA, XA`)下`TC`发送的`RPC`通信调用处理，接受`TC`的分支提交/回滚请求，内部持有真正的`RMHandler`用于处理`TC`发送的提交或者回滚分布式事务`RPC`指令。
 
 ```java
 public class DefaultRMHandler extends AbstractRMHandler {
@@ -568,6 +405,255 @@ public abstract class AbstractRMHandler extends AbstractExceptionHandler
     }
 }
 ```
+#### RM适配
+
+* `DefaultResourceManager`属于适配器，适配所有分布式事务方案(`AT, TCC, SAGA, XA`)下的`RM`调用，内部持有真正的`RM`用于执行真正的方法调用。
+
+```java
+public class DefaultResourceManager implements ResourceManager {
+    // 持有真正的RM对象
+    protected static Map<BranchType, ResourceManager> resourceManagers
+        = new ConcurrentHashMap<>();
+	// 向TC注册本地分支
+    public Long branchRegister(BranchType branchType, String resourceId,
+                               String clientId, String xid, String applicationData, String lockKeys){
+        return getResourceManager(branchType).branchRegister(branchType, resourceId, clientId, xid, applicationData,
+            lockKeys);
+    }
+	// 向TC汇报本地事务执行状况
+    public void branchReport(BranchType branchType, String xid, long branchId, BranchStatus status,
+                             String applicationData){
+        getResourceManager(branchType).branchReport(branchType, xid, branchId, status, applicationData);
+    }
+    // 接收TC指令提交分布式事务
+    public BranchStatus branchCommit(BranchType branchType, String xid, long branchId,
+                                     String resourceId, String applicationData){
+        return getResourceManager(branchType).branchCommit(branchType, xid, branchId, resourceId, applicationData);
+    }
+	// 接收TC指令回滚分布式事务
+    public BranchStatus branchRollback(BranchType branchType, String xid, long branchId,
+                                       String resourceId, String applicationData){
+        return getResourceManager(branchType).branchRollback(branchType, xid, branchId, resourceId, applicationData);
+    }
+}
+```
+
+##### 二阶段提交
+
+* 如果一阶段完成未抛异常，全局事务的发起方会向服务端申请提交全局事务，服务端根据 `xid` 查询加锁并关闭全局事务，防止该事务后续还有分支继续注册，同时将其状态从 `Begin` 修改为 `Committing`。二阶段提交时，客户端接收到服务端发送的 `branch commit` 请求，交由`AbstractRMHandler#handle`处理，之后根据 `resourceId` 找到相应的 `ResourceManager`进行后续处理。
+  
+* `ResourceManager`主要有四种实现类：`DataSourceManager, ResourceManagerXA, SagaResourceManager, TCCResourceManager`，分别对应于`AT, XA, Saga, TCC`这四种分布式事务方案。四个具体的`RM`都继承自`AbstractResourceManager`，此处使用模板模式，`AbstractResourceManager`实现了向TC注册和汇报的方法，由于各个分布式方案的提交与回滚方式不一致，提交与回滚方法由具体`RM`实现。
+
+    注册时携带分支的`xid`, `resourceId`, 分布式事务方案类型, 行锁注册到TC，获得分支ID。如果行锁指定的记录被其他分布式事务锁定，将注册失败，等待后续重试。
+
+```java
+public abstract class AbstractResourceManager implements ResourceManager {
+    // 携带分支的xid, resourceId, 分布式事务方案类型, 行锁注册到TC，获得分支ID
+    public Long branchRegister(BranchType branchType, String resourceId, String clientId, String xid, String applicationData, String lockKeys) throws TransactionException {
+            BranchRegisterRequest request = new BranchRegisterRequest();
+            request.setXid(xid);
+        	// 行锁指定的记录被其他分布式事务锁定，将注册失败，等待后续重试
+            request.setLockKey(lockKeys);
+            request.setResourceId(resourceId);
+            request.setBranchType(branchType);
+            request.setApplicationData(applicationData);
+            BranchRegisterResponse response = (BranchRegisterResponse) RmNettyRemotingClient.getInstance().sendSyncRequest(request);
+            return response.getBranchId();
+    }
+	// 携带分支的xid, 分支ID, 本地事务执行状态向TC汇报
+    public void branchReport(BranchType branchType, String xid, long branchId, BranchStatus status, String applicationData) throws TransactionException {
+            BranchReportRequest request = new BranchReportRequest();
+            request.setXid(xid);
+            request.setBranchId(branchId);
+            request.setStatus(status);
+            request.setApplicationData(applicationData);
+            BranchReportResponse response = (BranchReportResponse) RmNettyRemotingClient.getInstance().sendSyncRequest(request);
+    }
+}
+```
+
+* 以实现`AT`方案的`DataSourceManager`为例，继承自`AbstractResourceManager`，实现自己的执行本地事务、提交与回滚分布式事务的方法。
+
+* 在向`TC`汇报本地事务执行成功前，需要根据数据库表名和主键值生成`lockKeys`，用于标识需要锁定的数据库记录，通过`lockQuery`向`TC`发起获取数据库记录全局锁请求，如果成功这本地事务上报为成功，否则证明记录被其他尚未提交分布式事务占有，获取全局锁失败，进入等待重试阶段。
+
+```java
+public class DataSourceManager extends AbstractResourceManager {
+    // 在TC处尝试获取全局记录锁，锁定要修改记录
+    public boolean lockQuery(BranchType branchType, String resourceId, String xid, String lockKeys){
+        GlobalLockQueryRequest request = new GlobalLockQueryRequest();
+        request.setXid(xid);
+        // 根据数据库表名和主键值生成`lockKeys`，用于标识需要锁定的数据库记录
+        request.setLockKey(lockKeys);
+        request.setResourceId(resourceId);
+        GlobalLockQueryResponse response;
+        response = (GlobalLockQueryResponse) RmNettyRemotingClient.getInstance().sendSyncRequest(request);
+        return response.isLockable();
+    }
+}
+```
+
+* 通过`branchCommit`提交分布式事务时，由于本地事务已提交，数据已被持久化修改，立即释放相关记录的全局锁，修改全局事务状态为 `AsyncCommitting`，把提交请求放入一个异步任务的队列中，马上返回提交成功的结果给`TC`。异步队列中的提交请求真正执行时，只是删除相应`UNDOLOG`和行锁，可以快速完成。
+
+<img src="https://cdn.nlark.com/yuque/0/2020/png/397475/1592274358634-00a6b162-0147-4582-8a8c-1322a74ac45e.png" alt="img" style="zoom:50%;" />
+
+```java
+public class DataSourceManager extends AbstractResourceManager {    
+    private final AsyncWorker asyncWorker = new AsyncWorker(this);
+    // 接受TC指令，提交分布式事务
+    public BranchStatus branchCommit(BranchType branchType, String xid, long branchId, String resourceId,  String applicationData){
+        // 提交任务至任务队列，异步执行
+        return asyncWorker.branchCommit(xid, branchId, resourceId);
+    }
+}
+```
+
+* `AsyncWorker`为异步任务执行者，内部持有柱塞式任务队列`BlockingQueue`，提交的分布式事务加入柱塞队列，并通过`ScheduledExecutorService`，每隔1s从队列中取出要提交的事务，`undoLogManager`根据`xid, branchid`生成删除`undolog`的sql语句,并通过`DataSourceProxy`执行sql，批量删除`undolog`，完成分布式事务的提交。
+
+<img src="https://imgconvert.csdnimg.cn/aHR0cDovL3d3MS5zaW5haW1nLmNuL2xhcmdlL2MzYmViODk1Z3kxZzRuMXVpNG85Z2oyMGl4MGw1anMyLmpwZw" alt="img" style="zoom:60%;" />
+
+```java
+public class AsyncWorker {
+    // 柱塞式任务队列，任务直接加入队列即返回
+    private final BlockingQueue<Phase2Context> commitQueue;
+	// 定时任务消费任务队列中任务，完成批量提交分布式事务
+    private final ScheduledExecutorService scheduledExecutor;
+
+    public AsyncWorker(DataSourceManager dataSourceManager) {
+        this.dataSourceManager = dataSourceManager;
+        commitQueue = new LinkedBlockingQueue<>(ASYNC_COMMIT_BUFFER_LIMIT);
+        ThreadFactory threadFactory = new NamedThreadFactory("AsyncWorker", 2, true);
+        scheduledExecutor = new ScheduledThreadPoolExecutor(2, threadFactory);
+        // 定时任务每隔1s执行一次
+        scheduledExecutor.scheduleAtFixedRate(this::doBranchCommitSafely, 10, 1000, TimeUnit.MILLISECONDS);
+    }
+    
+	// DataSourceManager提交分布式事务时，加入队列即返回，任务异步执行
+    public BranchStatus branchCommit(String xid, long branchId, String resourceId) {
+        Phase2Context context = new Phase2Context(xid, branchId, resourceId);
+        addToCommitQueue(context);
+        return BranchStatus.PhaseTwo_Committed;
+    }
+
+    // 固定延迟调度消费任务队列中任务
+    private void dealWithGroupedContexts(String resourceId, List<Phase2Context> contexts) {
+        // DataSourceProxy为数据源代理，实现undolog的生成、提交、删除，undolog的操作交与 DataSourceProxy执行
+        DataSourceProxy dataSourceProxy = dataSourceManager.get(resourceId);
+        Connection conn = null;
+        conn = dataSourceProxy.getPlainConnection();
+        UndoLogManager undoLogManager = UndoLogManagerFactory.getUndoLogManager(dataSourceProxy.getDbType());
+        // 任务任务分为多个组，每组长为1000
+        List<List<Phase2Context>> splitByLimit = Lists.partition(contexts, UNDOLOG_DELETE_LIMIT_SIZE);
+        for (List<Phase2Context> partition : splitByLimit) {
+            // undoLogManager根据xid, branchid生成删除undolog的sql语句
+            // 并通过conn.prepareStatement执行sql，批量删除undolog
+            deleteUndoLog(conn, undoLogManager, partition);
+        IOUtil.close(conn);
+    }
+}
+```
+
+##### 二阶段回滚
+
+* 回滚该全局事务时服务端会根据 `xid` 查询全局事务，加锁关闭事务防止后续分支注册，并同时将状态 `Begin` 从变更为 `Rollbacking`，再先客户端发送回滚指令。客户端收到`TC`发送的回滚指令时`DefaultRMHandler#handle`触发`RM`执行回滚。
+
+* 通过`branchRollback`回滚分布式事务时，需要回滚一阶段已经执行的业务SQL，还原业务数据。`RM`通过`XID`找到对应的`undolog`回滚日志。首先校验脏写，对比数据库当前业务数据和`afterimage`，如果两份数据完全一致就说明没有脏写，可以还原业务数据，生成并执行回滚的语句；如果不一致就说明有脏写，需要额外处理。最后用`beforeimage`还原业务数据，并删除`undolog`日志，释放全局锁。
+
+<img src="https://cdn.nlark.com/yuque/0/2020/png/397475/1592276439872-c01178c4-68f9-492b-aeba-e13d4dee6b1d.png" alt="img" style="zoom:50%;" />
+
+* 回滚时先根据 `resourceId` 拿到对应的数据源代理，交由`UndoLogManager`执行回滚方法。
+
+```java
+public class DataSourceManager extends AbstractResourceManager {  
+    private final Map<String, Resource> dataSourceCache = new ConcurrentHashMap<>();
+    // 接受TC指令，混滚分布式事务
+    public BranchStatus branchRollback(BranchType branchType, String xid, long branchId, String resourceId, String applicationData) throws TransactionException {
+        DataSourceProxy dataSourceProxy = get(resourceId);
+ UndoLogManagerFactory.getUndoLogManager(dataSourceProxy.getDbType()).undo(dataSourceProxy, xid, branchId);
+        return BranchStatus.PhaseTwo_Rollbacked;
+    }
+}
+```
+
+- `UndoLogManager`同样使用了模板模式，回滚的逻辑调用流程由`UndoLogManager`的实现类`AbstractUndoLogManager`完成，流程中涉及到与数据库的具体操作将由`AbstractUndoLogManager`的之类实现，`AbstractUndoLogManager`的之类有`MySQLUndoLogManager, OracleUndoLogManager`等，由他们实现和数据库的底层交互。
+
+  在回滚方法中先关闭自动提交，保证回滚过程的原子性，从回滚数据表中根据`xid， branch`找到`undolog`，并构建并执行回滚SQL， 数据回滚执行成功，从`undolog`表中删除对应的`undolog`记录，如果执行数据回滚或者删除回滚日志失败，回滚当前操作。失败时如果`afterimage`数据与当前数据库数据不匹配，证明存在脏数据，上报`BranchTransactionException`错误需要手动处理。
+
+```java
+public abstract class AbstractUndoLogManager implements UndoLogManager {
+    public void undo(DataSourceProxy dataSourceProxy, String xid, long branchId) throws TransactionException {
+        ConnectionProxy connectionProxy = null;
+        Connection conn = null;
+        ResultSet rs = null;
+        PreparedStatement selectPST = null;
+        boolean originalAutoCommit = true;
+        for (; ; ) {
+            try {
+                connectionProxy = dataSourceProxy.getConnection();
+                conn = connectionProxy.getTargetConnection();
+                // 关闭自动提交，保证回滚过程的原子性
+                if (originalAutoCommit = conn.getAutoCommit()) {
+                    conn.setAutoCommit(false);
+                }
+                // 从回滚数据表总根据xid， branch找到undolog
+                selectPST = conn.prepareStatement(buildSelectUndoSql());
+                selectPST.setLong(1, branchId);
+                selectPST.setString(2, xid);
+                rs = selectPST.executeQuery();
+                boolean exists = false;
+                while (rs.next()) {
+                    exists = true;
+                    // 获得回滚日志对象
+                    String contextString = rs.getString(ClientTableColumnsName.UNDO_LOG_CONTEXT);
+                    Map<String, String> context = parseContext(contextString);
+                    byte[] rollbackInfo = getRollbackInfo(rs);
+                    String serializer = context == null ? null : context.get(UndoLogConstants.SERIALIZER_KEY);
+                    UndoLogParser parser = serializer == null ? UndoLogParserFactory.getInstance()
+                        : UndoLogParserFactory.getInstance(serializer);
+                    BranchUndoLog branchUndoLog = parser.decode(rollbackInfo);
+                    // 获得回滚SQL
+                    setCurrentSerializer(parser.getName());
+                    List<SQLUndoLog> sqlUndoLogs = branchUndoLog.getSqlUndoLogs();
+                    // 如果日志数量大于一，将SQL顺序反转，保证能还原到原始状态
+                    // 正向：1->2->3 回滚：3->2->1
+                    if (sqlUndoLogs.size() > 1) {
+                        Collections.reverse(sqlUndoLogs);
+                    }
+                    // 执行回滚SQL，
+                    for (SQLUndoLog sqlUndoLog : sqlUndoLogs) {
+                        TableMeta tableMeta = TableMetaCacheFactory.getTableMetaCache(dataSourceProxy.getDbType()).getTableMeta(
+                            conn, sqlUndoLog.getTableName(), dataSourceProxy.getResourceId());
+                        sqlUndoLog.setTableMeta(tableMeta);
+                        AbstractUndoExecutor undoExecutor = UndoExecutorFactory.getUndoExecutor(
+                            dataSourceProxy.getDbType(), sqlUndoLog);
+                        undoExecutor.executeOn(connectionProxy);
+                    }
+                }
+                // 数据回滚执行成功，从undolog表中删除undolog
+                if (exists) {
+                    deleteUndoLog(xid, branchId, conn);
+                    conn.commit();
+                } else {
+                    insertUndoLogWithGlobalFinished(xid, branchId, UndoLogParserFactory.getInstance(), conn);
+                    conn.commit();
+                }
+                return;
+            } catch (Throwable e) {
+                // 执行数据回滚或者删除回滚日志失败，回滚当前操作
+                conn.rollback();
+                }
+                // 如果afterimage数据与当前数据库数据不匹配，证明存在脏数据，需要手动处理
+                if (e instanceof SQLUndoDirtyException) {
+                    throw new BranchTransactionException();
+                }
+                throw new BranchTransactionException();
+            } 
+    }
+}
+```
+
+
+
+
 
 ### 全局事务拦截
 
