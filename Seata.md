@@ -1,8 +1,6 @@
 [TOC]
 
-## SEATA
-
-### 概述
+## 概述
 
 * `Seata`中有三大模块，分别是`TC`(事务协调器):维护全局事务的运行状态，负责协调并驱动全局事务的提交或回滚；`TM`(事务管理器)：控制全局事务的边界，负责开启一个全局事务，并最终发起全局提交或全局回滚的决议;`RM`(资源管理器)：控制分支事务，负责分支注册、状态汇报，并接收事务协调器的指令，驱动本地事务的提交和回滚。其中`TM`和`RM`是作为`Seata`的客户端与业务系统集成在一起，`TC`作为`Seata`的服务端独立部署。
 
@@ -10,7 +8,7 @@
 
 * 执行分布式事务时：->`TM`向`TC`请求发起（Begin）、提交（Commit）、回滚（Rollback）全局事务；->`TM`把代表全局事务的`XID`绑定到分支事务上；->`RM`向`TC`注册，把分支事务关联到`XID`代表的全局事务中；->`RM`把分支事务的执行结果上报给`TC`（可选，默认关闭）；->`TM`结束分布式事务，事务一阶段结束，`TM`通知`TC`提交/回滚分布式事务；->`TC`汇总事务信息，决定分布式事务是提交还是回滚；->`TC`通知所有`RM`提交/回滚资源，事务二阶段结束；
 
-### AT概述
+## AT方案
 
 * AT属于无侵入的分布式事务解决方案，为两阶段提交的变种。
 
@@ -43,6 +41,134 @@
 <img src="./assets/webp-1724587041953-49.webp" alt="img" style="zoom:57%;" /><img src="./assets/webp-1724587050361-52.png" alt="img" style="zoom:60%;" />
 
 ## AT实现
+
+### 分布式事务入口
+
+* 启动配置类`GlobalTransactionScanner`实现了`AbstractAutoProxyCreator`接口，本质上是一个`BeanPostProcessor`，会扫描全部bean，在`bean`初始化之前，调用内部的`postProcessBeforeInstantiation`方法，获取与被代理对象匹配的拦截器，创建AOP代理bean，完成逻辑增强。
+
+```java
+public abstract class AbstractAutoProxyCreator implements SmartInstantiationAwareBeanPostProcessor,
+	// 获取bean匹配拦截器，完成代理对象创建
+	public Object postProcessBeforeInstantiation(Class<?> beanClass, String beanName) {
+		Object cacheKey = getCacheKey(beanClass, beanName);
+		TargetSource targetSource = getCustomTargetSource(beanClass, beanName);
+		if (targetSource != null) {
+			if (StringUtils.hasLength(beanName)) {
+				this.targetSourcedBeans.add(beanName);
+			}
+            // 获取bean匹配拦截器
+			Object[] specificInterceptors = getAdvicesAndAdvisorsForBean(beanClass, beanName, targetSource);
+            // 创建代理对象
+			Object proxy = createProxy(beanClass, beanName, specificInterceptors, targetSource);
+			this.proxyTypes.put(cacheKey, proxy.getClass());
+			return proxy;
+		}
+		return null;
+	}
+}
+```
+
+* 与分布式事务相关的拦截器由`GlobalTransactionScanner#wrapIfNecessary`生成。他将为添加有`@GlobalTransactional`的类创建拦截器`AdapterSpringSeataInterceptor(ProxyInvocationHandler)`。由`ProxyInvocationHandler`真正执行代理拦截。
+
+```java
+public class AdapterSpringSeataInterceptor implements MethodInterceptor, SeataInterceptor, Ordered {
+
+    private ProxyInvocationHandler proxyInvocationHandler;
+	// 拦截器持有proxyInvocationHandler用于拦截DB调用
+    public AdapterSpringSeataInterceptor(ProxyInvocationHandler proxyInvocationHandler) {
+        this.proxyInvocationHandler = proxyInvocationHandler;
+    }
+	// 请求拦截交由proxyInvocationHandler实现
+    public Object invoke(@Nonnull MethodInvocation invocation) throws Throwable {
+        AdapterInvocationWrapper adapterInvocationWrapper = new AdapterInvocationWrapper(invocation);
+        Object result = proxyInvocationHandler.invoke(adapterInvocationWrapper);
+        return result;
+    }
+}
+```
+
+* `ProxyInvocationHandler`通过`GlobalTransactionalInterceptorHandler`代理`doInvoke`方法，拦截带有`GlobalTransactional`注解或者`GlobalLock`注解的方法，构建当前操作事务，交由`handleGlobalTransaction`或者`handleGlobalLock`执行。
+
+    对于`handleGlobalTransaction`由于需要开启新的分布式事务，由模板类`TransactionalTemplate`执行事务方法的反射调用。
+
+```java
+public class GlobalTransactionalInterceptorHandler extends AbstractProxyInvocationHandler implements ConfigurationChangeListener {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(GlobalTransactionalInterceptorHandler.class);
+
+    private final TransactionalTemplate transactionalTemplate = new TransactionalTemplate();
+    private final GlobalLockTemplate globalLockTemplate = new GlobalLockTemplate();
+
+    @Override
+    protected Object doInvoke(InvocationWrapper invocation) throws Throwable {
+        Class<?> targetClass = invocation.getTarget().getClass();
+        // 事务方法信息
+        Method specificMethod = ClassUtils.getMostSpecificMethod(invocation.getMethod(), targetClass);
+        if (specificMethod != null && !specificMethod.getDeclaringClass().equals(Object.class)) {
+            // 拦截带有`GlobalTransactional`注解的方法
+            final GlobalTransactional globalTransactionalAnnotation = getAnnotation(specificMethod, targetClass, GlobalTransactional.class);
+            // 拦截带有`GlobalLock`注解的方法
+            final GlobalLock globalLockAnnotation = getAnnotation(specificMethod, targetClass, GlobalLock.class);
+            // 是否开启分布式事务
+            boolean localDisable = disable || (ATOMIC_DEGRADE_CHECK.get() && degradeNum >= degradeCheckAllowTimes);
+            if (!localDisable) {
+                if (globalTransactionalAnnotation != null || this.aspectTransactional != null) {
+                    // 如果是带有`GlobalTransactional`注解的方法，通过handleGlobalTransaction执行
+                    AspectTransactional transactional=initTransactional()
+                    return handleGlobalTransaction(invocation, transactional);
+                } else if (globalLockAnnotation != null) {
+                    // 如果是带有`GlobalLock`注解的方法，通过handleGlobalLock执行
+                    return handleGlobalLock(invocation, globalLockAnnotation);
+                }
+            }
+        }
+        return invocation.proceed();
+    }
+
+    Object handleGlobalTransaction(final InvocationWrapper methodInvocation,
+                                   final AspectTransactional aspectTransactional) throws Throwable {
+        boolean succeed = true;
+        return transactionalTemplate.execute(new TransactionalExecutor() {
+            @Override
+            public Object execute() throws Throwable {
+                return methodInvocation.proceed();
+            }
+        });
+        
+    }
+}
+
+```
+
+* `TransactionalTemplate`用于在分布式事务下执行本地事务方法，同时向`TC`发起开始、提交、回滚请求。其中与`TC`通信部分由`DefaultGlobalTransaction`实现。
+
+```java
+public class TransactionalTemplate {
+  public Object execute(TransactionalExecutor business) throws Throwable {
+    // 1. 获取分布式事务
+    GlobalTransaction tx = GlobalTransactionContext.getCurrent();
+    try {
+        // 2. 向TC发起请求开始全局事务
+        beginTransaction(txInfo, tx);
+        Object rs = null;
+        try {
+            // 执行业务逻辑
+            rs = business.execute();
+        } catch (Throwable ex) {
+            // 3.业务逻辑异常，rollback全局事务
+            completeTransactionAfterThrowing(txInfo,tx,ex);
+            throw ex;
+        }
+        // 4. commit全局事务
+        commitTransaction(tx);
+        return rs;
+    } finally {
+        //5. 清理
+        triggerAfterCompletion();
+        cleanUp();
+    }
+}
+```
 
 ### 启动配置
 
@@ -125,7 +251,7 @@ public class SeataAutoDataSourceProxyCreator extends AbstractAutoProxyCreator {
 }
 ```
 
-### 连接代理
+#### 连接代理
 
 * 数据源代理对象根据传递的原始数据源，获得原始数据源的连接对象，并得到代理的连接对象`ConnectionProxyXA, ConnectionProxyXA`，代理`commit`方法，实现提交本地事务前获取行锁，之后根据被拦截方法备注类型执行不同调用。
 
@@ -185,7 +311,7 @@ public class ConnectionProxy extends AbstractConnectionProxy {
 }
 ```
 
-### 执行代理
+#### 执行代理
 
 <img src="./assets/aHR0cDovL3d3MS5zaW5haW1nLmNuL2xhcmdlL2MzYmViODk1Z3kxZzRseGllaTN3ZWoyMG5uMDdoM3l3LmpwZw.jpeg" alt="img" style="zoom:70%;" />
 
@@ -224,6 +350,8 @@ public class ExecuteTemplate {
         return rs;
     }
 ```
+
+### 一阶段拦截
 
 * 此处同样使用了模板模式，上述执行类都继承自`AbstractDMLBaseExecutor`，`AbstractDMLBaseExecutor`实现了`executeAutoCommitFalse`方法，完成SQL执行、`boforeImage, afterImage`、全局锁记录、构建回滚日志对象添加到`ConnectionProxy`上下文，尝试将其和业务修改在同一事务中提交，保证了一阶段操作的原子性。由于不同数据库针对`INSERT、UPDATE、DELETE` 有不同的实现具体，`boforeImage, afterImage`生成由子类具体实现。
 
@@ -438,7 +566,7 @@ public class DefaultResourceManager implements ResourceManager {
 }
 ```
 
-##### 二阶段提交
+### 二阶段提交
 
 * 如果一阶段完成未抛异常，全局事务的发起方会向服务端申请提交全局事务，服务端根据 `xid` 查询加锁并关闭全局事务，防止该事务后续还有分支继续注册，同时将其状态从 `Begin` 修改为 `Committing`。二阶段提交时，客户端接收到服务端发送的 `branch commit` 请求，交由`AbstractRMHandler#handle`处理，之后根据 `resourceId` 找到相应的 `ResourceManager`进行后续处理。
   
@@ -552,7 +680,7 @@ public class AsyncWorker {
 }
 ```
 
-##### 二阶段回滚
+### 二阶段回滚
 
 * 回滚该全局事务时服务端会根据 `xid` 查询全局事务，加锁关闭事务防止后续分支注册，并同时将状态 `Begin` 从变更为 `Rollbacking`，再先客户端发送回滚指令。客户端收到`TC`发送的回滚指令时`DefaultRMHandler#handle`触发`RM`执行回滚。
 
@@ -651,141 +779,7 @@ public abstract class AbstractUndoLogManager implements UndoLogManager {
 }
 ```
 
-
-
-
-
-### 全局事务拦截
-
-* 启动配置类`GlobalTransactionScanner`实现了`AbstractAutoProxyCreator`接口，本质上是一个`BeanPostProcessor`，会扫描全部bean，在`bean`初始化之前，调用内部的`postProcessBeforeInstantiation`方法，获取与被代理对象匹配的拦截器，创建AOP代理bean，完成逻辑增强。
-
-```java
-public abstract class AbstractAutoProxyCreator implements SmartInstantiationAwareBeanPostProcessor,
-	// 获取bean匹配拦截器，完成代理对象创建
-	public Object postProcessBeforeInstantiation(Class<?> beanClass, String beanName) {
-		Object cacheKey = getCacheKey(beanClass, beanName);
-		TargetSource targetSource = getCustomTargetSource(beanClass, beanName);
-		if (targetSource != null) {
-			if (StringUtils.hasLength(beanName)) {
-				this.targetSourcedBeans.add(beanName);
-			}
-            // 获取bean匹配拦截器
-			Object[] specificInterceptors = getAdvicesAndAdvisorsForBean(beanClass, beanName, targetSource);
-            // 创建代理对象
-			Object proxy = createProxy(beanClass, beanName, specificInterceptors, targetSource);
-			this.proxyTypes.put(cacheKey, proxy.getClass());
-			return proxy;
-		}
-		return null;
-	}
-}
-```
-
-* 与分布式事务相关的拦截器由`GlobalTransactionScanner#wrapIfNecessary`生成。他将为添加有`@GlobalTransactional`的类创建拦截器`AdapterSpringSeataInterceptor(ProxyInvocationHandler)`。由`ProxyInvocationHandler`真正执行代理拦截。
-
-```java
-public class AdapterSpringSeataInterceptor implements MethodInterceptor, SeataInterceptor, Ordered {
-
-    private ProxyInvocationHandler proxyInvocationHandler;
-	// 拦截器持有proxyInvocationHandler用于拦截DB调用
-    public AdapterSpringSeataInterceptor(ProxyInvocationHandler proxyInvocationHandler) {
-        this.proxyInvocationHandler = proxyInvocationHandler;
-    }
-	// 请求拦截交由proxyInvocationHandler实现
-    public Object invoke(@Nonnull MethodInvocation invocation) throws Throwable {
-        AdapterInvocationWrapper adapterInvocationWrapper = new AdapterInvocationWrapper(invocation);
-        Object result = proxyInvocationHandler.invoke(adapterInvocationWrapper);
-        return result;
-    }
-}
-```
-
-* `ProxyInvocationHandler`通过`GlobalTransactionalInterceptorHandler`代理`doInvoke`方法，拦截带有`GlobalTransactional`注解或者`GlobalLock`注解的方法，构建当前操作事务，交由`handleGlobalTransaction`或者`handleGlobalLock`执行。
-
-    对于`handleGlobalTransaction`由于需要开启新的分布式事务，由模板类`TransactionalTemplate`执行事务方法的反射调用。
-
-```java
-public class GlobalTransactionalInterceptorHandler extends AbstractProxyInvocationHandler implements ConfigurationChangeListener {
-
-    private static final Logger LOGGER = LoggerFactory.getLogger(GlobalTransactionalInterceptorHandler.class);
-
-    private final TransactionalTemplate transactionalTemplate = new TransactionalTemplate();
-    private final GlobalLockTemplate globalLockTemplate = new GlobalLockTemplate();
-
-    @Override
-    protected Object doInvoke(InvocationWrapper invocation) throws Throwable {
-        Class<?> targetClass = invocation.getTarget().getClass();
-        // 事务方法信息
-        Method specificMethod = ClassUtils.getMostSpecificMethod(invocation.getMethod(), targetClass);
-        if (specificMethod != null && !specificMethod.getDeclaringClass().equals(Object.class)) {
-            // 拦截带有`GlobalTransactional`注解的方法
-            final GlobalTransactional globalTransactionalAnnotation = getAnnotation(specificMethod, targetClass, GlobalTransactional.class);
-            // 拦截带有`GlobalLock`注解的方法
-            final GlobalLock globalLockAnnotation = getAnnotation(specificMethod, targetClass, GlobalLock.class);
-            // 是否开启分布式事务
-            boolean localDisable = disable || (ATOMIC_DEGRADE_CHECK.get() && degradeNum >= degradeCheckAllowTimes);
-            if (!localDisable) {
-                if (globalTransactionalAnnotation != null || this.aspectTransactional != null) {
-                    // 如果是带有`GlobalTransactional`注解的方法，通过handleGlobalTransaction执行
-                    AspectTransactional transactional=initTransactional()
-                    return handleGlobalTransaction(invocation, transactional);
-                } else if (globalLockAnnotation != null) {
-                    // 如果是带有`GlobalLock`注解的方法，通过handleGlobalLock执行
-                    return handleGlobalLock(invocation, globalLockAnnotation);
-                }
-            }
-        }
-        return invocation.proceed();
-    }
-
-    Object handleGlobalTransaction(final InvocationWrapper methodInvocation,
-                                   final AspectTransactional aspectTransactional) throws Throwable {
-        boolean succeed = true;
-        return transactionalTemplate.execute(new TransactionalExecutor() {
-            @Override
-            public Object execute() throws Throwable {
-                return methodInvocation.proceed();
-            }
-        });
-        
-    }
-}
-
-```
-
-* `TransactionalTemplate`用于在分布式事务下执行本地事务方法，同时向`TC`发起开始、提交、回滚请求。其中与`TC`通信部分由`DefaultGlobalTransaction`实现。业务带来
-
-```java
-public class TransactionalTemplate {
-  public Object execute(TransactionalExecutor business) throws Throwable {
-    // 1. 获取分布式事务
-    GlobalTransaction tx = GlobalTransactionContext.getCurrent();
-    try {
-        // 2. 向TC发起请求开始全局事务
-        beginTransaction(txInfo, tx);
-        Object rs = null;
-        try {
-            // 执行业务逻辑
-            rs = business.execute();
-        } catch (Throwable ex) {
-            // 3.业务逻辑异常，rollback全局事务
-            completeTransactionAfterThrowing(txInfo,tx,ex);
-            throw ex;
-        }
-        // 4. commit全局事务
-        commitTransaction(tx);
-        return rs;
-    } finally {
-        //5. 清理
-        triggerAfterCompletion();
-        cleanUp();
-    }
-}
-```
-
-
-
-### TCC
+## TCC方案
 
 #### 概述
 
@@ -811,12 +805,12 @@ public class TransactionalTemplate {
 
 * 幂等性：一次请求和重复的多次请求对系统资源的影响是一致的，在`RM`处保留`XID`对应事务`Try,Comform,Cancel`执行情况，用事务`XID`判重。
 
-### saga
+## saga方案
 
 * Saga模式属于有侵入是分布式事务方案。各个阶段无直接耦合，参与者可以采用事务驱动异步执行高吞吐，通过逆向操作完成回滚。每个阶段完成后提交本地事务，无全局锁，长流程情况下可以保证性能。由于正向阶段无全局锁，且未进行进行资源预留，其他事务可以在分布式事务未完成时，读取到已完成阶段修改的数据，不能保证隔离性
 
 <img src="./assets/image-20240825162517159.png" alt="image-20240825162517159" style="zoom:60%;" />
 
-### XA
+## XA方案
 
 * XA属于无侵入式两阶段提交变种，通过分布式事务提交前一直持有锁的方式，保障从任意视角对数据的访问有效隔离，满足全局数据一致性，性能很差。
