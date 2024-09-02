@@ -1,3 +1,5 @@
+[toc]
+
 ## 概述
 
 * 整体可以分为三个角色：调度中心、执行器、任务。
@@ -10,9 +12,11 @@
 
 <img src="./assets/xxljob.svg" alt="xxljob" style="zoom:65%;" />
 
-## 执行器注册
+## 执行器初始化
 
-![24201c0c2e28420f8973db0dfb56ce16~tplv-k3u1fbpfcp-zoom-in-crop-mark_1512_0_0_0](./assets/24201c0c2e28420f8973db0dfb56ce16tplv-k3u1fbpfcp-zoom-in-crop-mark_1512_0_0_0.webp)
+### handler注册
+
+<img src="./assets/24201c0c2e28420f8973db0dfb56ce16tplv-k3u1fbpfcp-zoom-in-crop-mark_1512_0_0_0.webp" alt="24201c0c2e28420f8973db0dfb56ce16~tplv-k3u1fbpfcp-zoom-in-crop-mark_1512_0_0_0" style="zoom:50%;" />
 
 * 定义的任务需要添加注解`@XxlJob`，同时指明任务名称，以及初始化和回收方法。
 * 任务注册由`XxlJobSpringExecutor`完成，`XxlJobSpringExecutor`实现了`SmartInitializingSingleton`接口，在`afterSingletonsInstantiated`方法中完成任务收集，以及通过`netty`暴漏接口以供任务调度器调用，开启回调线程，以向调度器汇报任务执行状况，最后向调度器注册任务执行器。
@@ -58,28 +62,11 @@ public class XxlJobSpringExecutor extends XxlJobExecutor implements SmartInitial
 }
 ```
 
-* 注册任务时，任务对象本身保存添加注解`XxlJob`的方法、所在对象，以及可选的任务前置后后置方法。当任务被调度执行时，通过反射调用原始添加有`XxlJob`注解的方法。
-
-```java
-public class MethodJobHandler extends IJobHandler {
-    private final Object target;
-    private final Method method;
-    private Method initMethod;
-    private Method destroyMethod;
-    public void execute() throws Exception {
-        Class<?>[] paramTypes = method.getParameterTypes();
-        // 反射调用原始添加有`XxlJob`注解的方法
-        if (paramTypes.length > 0) {
-            method.invoke(target, new Object[paramTypes.length]);
-        } else {
-            method.invoke(target);
-        }
-    }
-}
-```
+### 执行器注册
 
 * 在通过`XxlJobExecutor#start`初始化执行器时，会触发`ExecutorRegistryThread#start`的执行，对象内部开启独立线程，只要执行器未停止就通过死循环的方式不断向调度中心注册执行器，通过这种方式更新调度中心处执行器最新注册时间，即`xxl_job_registry`中`update_time`字段。
-* ![image-20240831195755217](./assets/image-20240831195755217.png)
+
+<img src="./assets/image-20240831195755217.png" alt="image-20240831195755217" style="zoom:70%;" />
 
 ```java
 public class ExecutorRegistryThread {
@@ -122,6 +109,8 @@ public class ExecutorRegistryThread {
         registryThread.start();
     }
 ```
+
+### 执行器注销
 
 * 当执行器主动退出时，由于`XxlJobSpringExecutor`实现`DisposableBean`接口，`destory`方法将调用父类的`XxlJobExecutor#destory`，再跳转到`ExecutorRegistryThread#toStop`方法，将执行器停止标志位`toStop=true`。将终止循环注册流程，进入主动执行注销过程`registryRemove`，将自己从调度中心移除。
 
@@ -173,6 +162,8 @@ XxlJobAdminConfig.getAdminConfig().getXxlJobRegistryDao().removeDead(ids);
 ```
 
 ## 任务触发
+
+### 任务扫描
 
 * 在调度中心，任务触发通过独立线程定时扫描任务表完成。在`JobScheduleHelper#start`方法中初始化了任务触发线程`scheduleThread`。
 
@@ -284,6 +275,8 @@ public class JobScheduleHelper {
 }
 ```
 
+### 触发时间判定
+
 * 此处的时间轮使用`HashMap`实现，`key`表示任务被调度时间的秒数，`value`为任务ID。根据任务的触发时间，决定任务将被放置于`HashMap`中哪个桶中，任务调度线程通过当前时间秒数定位哪个桶中任务将被触发。
 
 <img src="./assets/19f2c5fd46154095be6ee9f319d73cebtplv-k3u1fbpfcp-zoom-in-crop-mark_1512_0_0_0.webp" alt="19f2c5fd46154095be6ee9f319d73ceb~tplv-k3u1fbpfcp-zoom-in-crop-mark_1512_0_0_0" style="zoom:50%;" />
@@ -305,13 +298,14 @@ public class JobScheduleHelper {
 
 ## 任务调度
 
+### 任务获取
+
 * 在调度中心，任务调度同样通过独立线程完成。在`JobScheduleHelper#start`方法中初始化了任务调度线程`ringThread`。
 * 首先时间对齐，休眠到下一个秒时刻开始，保证下一秒时刻到来后及时开始任务调度；获取当前与前一个时刻任务列表，目的是为了避免t-2时刻任务调度处理耗时太长，导致t-1时刻任务未被及时调度，在t时刻时同时检测t-1和t时刻任务，由于任务调度后被清理，向前校验t-1时刻不会导致任务被重复调度；最后执行任务触发。
 
 ```java
 public class JobScheduleHelper {
     private Thread scheduleThread;
-
     public void start() { 
         ringThread = new Thread(new Runnable() {
             @Override
@@ -346,6 +340,8 @@ public class JobScheduleHelper {
     }
 }
 ```
+
+### 任务派发
 
 * 任务的派发和任务的触发、任务的调度同样使用独立线程，异步执行。任务派发线程有两个可选线程池`fastTriggerPool`和`slowTriggerPool`，分别用于短派发耗时任务和长派发耗时任务的派发。当前所在分钟内派发时间超过500ms的次数超过10次的任务被标记为长派发耗时任务，长短派发耗时任务使用不同线程池，通过资源隔离的方式，避免执行较慢的任务占用过多资源，影响到其他正常任务的调度，导致后续任务无法及时派发。
 * 此处使用较为简单的固定窗口的方式统计任务派发耗时，而非滑动窗口的方式，通过` ConcurrentMap<Integer, AtomicInteger>`直接统计当前时刻所在分钟内任务超时次数，`key`为任务ID，`value`为当前分钟内超时次数。当到达下一个分钟时清空统计值，开始新的统计周期。当任务派发完成后还需要将当前派发耗时加入统计集合。
@@ -401,6 +397,8 @@ public class JobTriggerPoolHelper {
     }
 }
 ```
+
+### 任务路由
 
 * 任务派发具体由`XxlJobTrigger#trigger`完成。将根据任务配置的基本信息，获取执行该任务的执行器分组信息、路由参数、以及是否进行任务广播。一个任务执行器分组下可以包含多个任务执行器，拥有提高执行任务的并发能力，在分发任务时，可以选择广播任务，该分组下所有执行器都将收到派发任务，也可以指定具体的路由参数和路由策略，选择分组下某一个执行器执行任务。
 
@@ -492,6 +490,8 @@ public class XxlJobTrigger {
 }
 ```
 
+### 路由策略
+
 * 执行器选择使用了策略设计模式，`ExecutorRouteStrategyEnum`为一个枚举类，内部持有路由策略名称`title`和路由策略实现类`router`。
 
     预先定义了多个策略，如轮询策略`jobconf_route_round`，随机策略`jobconf_route_random`，一致性哈希策略`jobconf_route_consistenthash`，最近最少使用策略`jobconf_route_lru`，最近最低频率使用`jobconf_route_lfu`，空闲执行器策略`ExecutorRouteBusyover`，状态正常执行器策略`ExecutorRouteFailover`。
@@ -521,6 +521,8 @@ public abstract class ExecutorRouter {
 }
 ```
 
+#### 空闲执行器策略
+
 * 对于空闲执行器策略`ExecutorRouteBusyover`，调度中心向执行器群组中全部执行器依次发送空闲心跳信号，如果能收到正确的响应，则任务该执行器空闲，将选择向该执行器派发任务。
 
 ```java
@@ -547,6 +549,8 @@ public ReturnT<String> route(TriggerParam triggerParam, List<String> addressList
 }
 
 ```
+
+#### 一致性哈希策略
 
 * 对于一致性哈希路由策略`ExecutorRouteConsistentHash`，通过构建哈希环，计算每一个执行器节点在哈希环上位置，在获取执行任务的执行器时，同样计算任务的哈希值，找到在哈希环上顺时针方向，第一个执行器节点。通过这种方法保证同一个人将始终被同一个执行器执行，实现了亲和性调度，适合于需要依赖上下文的任务。此外由于哈希算法的随机性，每个执行器负责的哈希值区间的任务数相近，保证了每个执行器都具有相同的负载。
 
@@ -601,12 +605,16 @@ public ReturnT<String> route(TriggerParam triggerParam, List<String> addressList
 }
 ```
 
+#### LRU策略
+
 * 最近最少使用策略`jobconf_route_lru`实现较为简单，使用`LinkedHashMap`保存执行器访问历史，其`key, value`均为执行器地址，`LinkedHashMap`内部通过链表的方式维护了数据的插入顺序。通过迭代器可获得访问间隔最远的执行器节点，并通过重新插入的方式，更新全部节点访问顺序。
 
     ```java
     String eldestKey = lruItem.entrySet().iterator().next().getKey();
     String eldestValue = lruItem.get(eldestKey);
     ```
+
+    #### LFU策略
 
 * 最近最低频率使用`jobconf_route_lfu`，使用固定窗口的方式，通过`HashMap<String, Integer>`保存24小时内，执行器及其访问次数。通过对`value`排序的方式获得最近24内访问次数至少的执行器，作为当前任务的执行器。该方法时间复杂度为`O(nlogn)`，存在时间复杂度为`O(1)`的`LFU`实现，可以降低复杂度。
 
@@ -625,6 +633,8 @@ public ReturnT<String> route(TriggerParam triggerParam, List<String> addressList
     // 该执行器访问次数加一
     addressItem.setValue(addressItem.getValue() + 1);
     ```
+
+#### 轮询策略
 
 * 轮询策略`ExecutorRouteRound`，使用`ConcurrentMap<Integer, AtomicInteger>`记录每个任务被执行次数，`key`为任务ID，`value`为执行次数。通过执行次数除以执行器群组下执行器数目取余的方式获得目标执行器。
 
@@ -648,6 +658,9 @@ public ReturnT<String> route(TriggerParam triggerParam, List<String> addressList
 ## 任务执行
 
 * 当任务执行器收到派发任务时，先获取任务的执行线程和真正的执行体。任务的执行同样使用异步策略，每个`jobHander`对应一个单独的线程和柱塞队列，实现资源隔离。
+
+#### 阻塞策略
+
 * 任务将根据配置的柱塞策略决定任务的执行行为：如果使用`DISCARD_LATER`策略，则如果前一个任务没有执行完毕，直接丢弃当前任务；如果使用`COVER_EARLY`策略，如果前一个任务没有执行完毕，将单独新开任务线程取代原有线程，当前任务被立即执行，先前的线程会在执行完毕后被GC回收；如果使用`SERIAL_EXECUTION`策略，如果前一个任务没有执行完毕，则加入柱塞队列，等待被调用。
 
 ```java
@@ -689,6 +702,8 @@ public class ExecutorBizImpl implements ExecutorBiz{
 }
 ```
 
+#### 超时控制
+
 * 在任务线程内，根据色否设定任务执行超时时间，决定任务的执行方。如果设定超时时间，则新开线程通过`FutureTask`控制执行时间；未设定超时时间，当前线程直接执行。`jobHander`最终通过反射调用执行。
 
 ```java
@@ -723,7 +738,29 @@ if (triggerParam.getExecutorTimeout() > 0) {
 }
 ```
 
-## 执行反馈
+#### 反射调用
+
+* 注册任务时，任务对象本身保存添加注解`XxlJob`的方法、所在对象，以及可选的任务前置后后置方法。当任务被调度执行时，通过反射调用原始添加有`XxlJob`注解的方法。
+
+```java
+public class MethodJobHandler extends IJobHandler {
+    private final Object target;
+    private final Method method;
+    private Method initMethod;
+    private Method destroyMethod;
+    public void execute() throws Exception {
+        Class<?>[] paramTypes = method.getParameterTypes();
+        // 反射调用原始添加有`XxlJob`注解的方法
+        if (paramTypes.length > 0) {
+            method.invoke(target, new Object[paramTypes.length]);
+        } else {
+            method.invoke(target);
+        }
+    }
+}
+```
+
+## 回调反馈
 
 * 任务被触发执行后，需要将执行结果反馈给调度中心。反馈方式同样使用异步执行，流程和`JobThread`相似。`JobThread#run`中将任务执行信息加入`TriggerCallbackThread`的`callBackQueue`后即返回。
 
@@ -780,9 +817,30 @@ public class TriggerCallbackThread {
 
 ## 优化思考
 
-#### 现有瓶颈
+### 现有瓶颈
 
 * 单点数据库问题：缺乏高可用保证，同时数据库的又是在于事务和持久化当前设计下，未用到事务特性。
 * 分布式锁问题：使用数据库实现分布式锁，加锁解锁耗时较长；同时限制同一时刻只有一个调度节点进行任务调度，并发度受限。
 * 任务阻塞队列不可靠：每个任务对应一个阻塞队列，用于缓存待执行任务，队列未实现持久化机制，可能导致任务丢失。
 
+### 优化设计
+
+* 使用redis集群替代数据库，此处使用`write thought`策略，任务的写入和读取都直接与redis交互，同时使用异步方式完成任务信息持久化到数据库，同时数据库为redis集群初始化提供支持。
+
+* redis中对任务的操作主要是读取将要被触发任务，之后更新该任务下次触发时间，读写比例为1:1。可以使用redis集群的方式部署，通过哈希槽，每个主从redis集合负责存储部分数据，降低主从集合读写压力，并且由于读写比例接近1:1，以一主一从方式配置主从节点，从节点负责读取，主节点负责写入，二者互为灾备。
+
+* `redis`中使用`z-set`方式保存任务ID、下次触发时间，并且按照下次触发时间排序，通过`zrangeByScore`获得触发时间小于当前时间+5s的全部任务。`z-set`使用跳表数据结构，可以以`log(n)+m`复杂度时间复杂度获取目标任务，其中`n`为集合中任务总数，`m`为取出的任务数。
+
+    ```java
+    jedis.zadd("biz-group", nextTime, jobId);
+    jedis.zrangeByScore("biz-group", 0, currTime+5s);
+    ```
+
+* 调度集群设计为允许多个调度节点同时调度，集群中以当前任期为`key`，通过向`zk`抢锁的方式确定当前任期下主节点。主调度节点使用扫描线程从`redis`集群中获得将要被触发任务，之后根据负载均衡策略(如一致性哈希、随机、轮询等)将任务分配给调度集群中的全部节点。
+* 每个调度节点在收到任务，将任务放入时间轮后，由于时间轮为内存中结构，断点数据丢失，需要持久化保存，以供当前节点崩溃后，将未处理任务转移到其他健康节点。此时分配到单个节点且将要的被触发的任务数量有有限，持久化压力较小，可以使用数据库或者`redis`实现。
+* 调度集群中主节点需要定时发送心跳信号给从节点，当从节点超时未获得主节点心跳信号时，向其余节点发起主节点下线确认请求，获得过半确认后，则认为主节点下线，当前节点成为候选人节点，将当前集群任期`term`递增，以新的任期数构建`key`，尝试去`zk`获得分布式锁，成为新的主节点，成功后向所有从节点广播心跳信号，更新集群任期。此时再有节点发起主节点下线确认请求时，从节点将否认主节点下线，阻止节点成为候选人节点。如果多个节点同时确认主节点下线，将任期加一后，得到相同的下一个任期，生成相同的`key`，此时只有一个候选人节点能成功从`zk`获得锁，其余失败节点在收到新主节点心跳后，放弃继续抢锁。
+* 主节点也需要检测从节点健康状况，如果从节点崩溃，主节点负责将该节点未处理完任务从持久化截至中取出，转移给其它节点。如果是主节点崩溃，在新主节点选举后，由新主节点负责将老主节点任务转移到其他健康节点。通过任务持久化+健康检测机制+故障转移保证调度集群高可用。
+* 任务派发到执行器使用MQ实现，由MQ实现任务队列的持久化与可靠性传输，执行器重启后也能连接上订阅任务队列，保证任务可靠执行。每种任务对应一个`topic`，每个`topic`下多个队列，队列与执行器一一对应，执行器通过订阅对应队列获得任务。在进行任务投递到MQ时，同样需要支持负载均衡策略，以`RocketMQ`为例，需要实现对用的`selector`，让任务路由到正确的队列，最终流向正确的执行器。
+* 每个执行器可以执行多种类型任务，需要订阅支持任务类型对应`topic`下，响应的队列，以获取负载均衡后分配给自己的任务。
+
+![image-20240902212050079](./assets/image-20240902212050079.png)
