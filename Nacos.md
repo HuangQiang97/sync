@@ -622,8 +622,6 @@ public class LoadBalancerClientConfigurationRegistrar implements ImportBeanDefin
 
 ### RestTemplate负载均衡
 
-
-
 #### 启动配置
 
 * `RestTemplate`实现对`Restful`请求的收发，通过对实例化`RestTemplate`的`Bean`方法添加`@LoadBalanced`注解，实现对`RestTemplate`的负载均衡。
