@@ -1,0 +1,144 @@
+{
+  "main": {
+    "id": "bb648831463913f9",
+    "type": "split",
+    "children": [
+      {
+        "id": "ea60b6ce0e558045",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "022abe61a90630e4",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "windows软件列表.md",
+                "mode": "preview",
+                "source": false
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "5ea0c8fed0397f82",
+    "type": "split",
+    "children": [
+      {
+        "id": "24d44178b9b1d198",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "4f562f5a549390a0",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical"
+              }
+            }
+          },
+          {
+            "id": "c069b8cc25d6705a",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              }
+            }
+          },
+          {
+            "id": "3a7d26bc19dc841f",
+            "type": "leaf",
+            "state": {
+              "type": "starred",
+              "state": {}
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "right": {
+    "id": "10267db4ebbf1cf5",
+    "type": "split",
+    "children": [
+      {
+        "id": "af69d247752fea71",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "3e53e0d7074d324a",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "windows软件列表.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              }
+            }
+          },
+          {
+            "id": "79fa8a7898d4fdf0",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "windows软件列表.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              }
+            }
+          },
+          {
+            "id": "97b4b61a380c9bed",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true
+              }
+            }
+          },
+          {
+            "id": "d8041e12273b5153",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "windows软件列表.md"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "active": "022abe61a90630e4",
+  "lastOpenFiles": [
+    "TyporaKeys.md"
+  ]
+}
