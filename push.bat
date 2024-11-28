@@ -11,4 +11,4 @@ REM 提交并使用当前时间作为提交信息
 git commit -m "%timestamp%"
 
 REM 推送到远程仓库
-git push
+git push --set-upstream origin main
