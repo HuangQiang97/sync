@@ -1,5 +1,7 @@
 [
   "editor-width-slider",
   "editing-toolbar",
-  "obsidian-git"
+  "obsidian-git",
+  "mousewheel-image-zoom",
+  "obsidian-custom-attachment-location"
 ]

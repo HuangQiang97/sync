@@ -4,11 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "3081bf4685f29c3f",
+        "id": "ec110217631e5904",
         "type": "tabs",
         "children": [
           {
-            "id": "8e25589226f34c83",
+            "id": "22c20dbcdd4d5d1a",
             "type": "leaf",
             "state": {
               "type": "markdown",
@@ -77,7 +77,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300,
+    "width": 208.49999618530273,
     "collapsed": true
   },
   "right": {
@@ -175,17 +175,22 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "8e25589226f34c83",
+  "active": "22c20dbcdd4d5d1a",
   "lastOpenFiles": [
-    "存档/临时.md",
+    "就业/面经.md",
+    "就业/测评.md",
+    "就业/舔狗.assets/image-20221109105551889.png",
+    "存档/assets/零碎/file-20241128154442151.png",
     "存档/零碎.md",
+    "存档/assets/零碎",
+    "存档/assets",
+    "存档/临时.md",
     "存档",
     "新建文件夹",
     "push.bat",
     "新建 TXT 文件.txt",
     "pull.bat",
     "未命名.canvas",
-    "就业/面经.md",
     "临时.md",
     "零碎.md"
   ]
