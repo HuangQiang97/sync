@@ -1,9 +1,10 @@
 {
   "cssTheme": "Obsidian gruvbox",
-  "textFontFamily": "更纱黑体 UI SC,Times New Roman",
-  "monospaceFontFamily": "JetBrainsMono Nerd Font,更纱黑体 UI SC",
-  "interfaceFontFamily": "更纱黑体 UI SC",
+  "textFontFamily": "更纱黑体 SC,Times New Roman",
+  "monospaceFontFamily": "JetBrains Mono,更纱黑体 SC",
+  "interfaceFontFamily": "更纱黑体 SC,Times New Roman",
   "enabledCssSnippets": [
     "image"
-  ]
+  ],
+  "baseFontSize": 16
 }

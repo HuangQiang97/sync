@@ -4,8 +4,29 @@
     "type": "split",
     "children": [
       {
+        "id": "023b374df22ac3f9",
+        "type": "tabs",
+        "dimension": 15.422535211267604,
+        "children": [
+          {
+            "id": "933917966ac8b9cd",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "就业/面经.md"
+              },
+              "icon": "lucide-list",
+              "title": "面经 的大纲"
+            },
+            "group": "f7b45f8b159df876"
+          }
+        ]
+      },
+      {
         "id": "ec110217631e5904",
         "type": "tabs",
+        "dimension": 84.5774647887324,
         "children": [
           {
             "id": "22c20dbcdd4d5d1a",
@@ -19,7 +40,8 @@
               },
               "icon": "lucide-file",
               "title": "面经"
-            }
+            },
+            "group": "f7b45f8b159df876"
           }
         ]
       }
@@ -157,7 +179,7 @@
             }
           }
         ],
-        "currentTab": 4
+        "currentTab": 1
       }
     ],
     "direction": "horizontal",
@@ -177,6 +199,9 @@
   },
   "active": "22c20dbcdd4d5d1a",
   "lastOpenFiles": [
+    "就业/assets/面经/file-20241203013858339.png",
+    "就业/assets/面经",
+    "就业/assets",
     "就业/面经.md",
     "就业/测评.md",
     "就业/舔狗.assets/image-20221109105551889.png",
