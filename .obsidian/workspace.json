@@ -15,9 +15,7 @@
               "type": "outline",
               "state": {
                 "file": "就业/面经.md"
-              },
-              "icon": "lucide-list",
-              "title": "面经 的大纲"
+              }
             },
             "group": "f7b45f8b159df876"
           }
@@ -37,9 +35,7 @@
                 "file": "就业/面经.md",
                 "mode": "source",
                 "source": false
-              },
-              "icon": "lucide-file",
-              "title": "面经"
+              }
             },
             "group": "f7b45f8b159df876"
           }
@@ -63,9 +59,7 @@
               "type": "file-explorer",
               "state": {
                 "sortOrder": "alphabetical"
-              },
-              "icon": "lucide-folder-closed",
-              "title": "文件列表"
+              }
             }
           },
           {
@@ -80,9 +74,7 @@
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical"
-              },
-              "icon": "lucide-search",
-              "title": "搜索"
+              }
             }
           },
           {
@@ -90,9 +82,7 @@
             "type": "leaf",
             "state": {
               "type": "bookmarks",
-              "state": {},
-              "icon": "lucide-bookmark",
-              "title": "书签"
+              "state": {}
             }
           }
         ]
@@ -124,9 +114,7 @@
                 "searchQuery": "",
                 "backlinkCollapsed": false,
                 "unlinkedCollapsed": true
-              },
-              "icon": "links-coming-in",
-              "title": "面经 的反向链接列表"
+              }
             }
           },
           {
@@ -138,9 +126,7 @@
                 "file": "就业/面经.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
-              },
-              "icon": "links-going-out",
-              "title": "面经 的出链列表"
+              }
             }
           },
           {
@@ -151,9 +137,7 @@
               "state": {
                 "sortOrder": "frequency",
                 "useHierarchy": true
-              },
-              "icon": "lucide-tags",
-              "title": "标签"
+              }
             }
           },
           {
@@ -163,9 +147,7 @@
               "type": "outline",
               "state": {
                 "file": "就业/面经.md"
-              },
-              "icon": "lucide-list",
-              "title": "面经 的大纲"
+              }
             }
           },
           {
@@ -173,9 +155,7 @@
             "type": "leaf",
             "state": {
               "type": "git-view",
-              "state": {},
-              "icon": "git-pull-request",
-              "title": "Source Control"
+              "state": {}
             }
           }
         ],
