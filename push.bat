@@ -12,3 +12,5 @@ git commit -m "%timestamp%"
 
 REM 推送到远程仓库
 git push --set-upstream origin main
+
+pause
