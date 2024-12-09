@@ -4,9 +4,9 @@
     "type": "split",
     "children": [
       {
-        "id": "db9a8eef81c8d730",
+        "id": "0fdc2d3c24e80520",
         "type": "tabs",
-        "dimension": 17.323943661971832,
+        "dimension": 19.25566343042071,
         "children": [
           {
             "id": "29158a952e43fd28",
@@ -18,44 +18,17 @@
               },
               "icon": "lucide-list",
               "title": "面经 的大纲"
-            },
-            "group": "1ce8f4e6f62330f3"
+            }
           }
         ]
       },
       {
-        "id": "023b374df22ac3f9",
+        "id": "db9a8eef81c8d730",
         "type": "tabs",
-        "dimension": 82.67605633802818,
+        "dimension": 80.74433656957929,
         "children": [
           {
-            "id": "933917966ac8b9cd",
-            "type": "leaf",
-            "state": {
-              "type": "outline",
-              "state": {
-                "file": "就业/面经.md"
-              },
-              "icon": "lucide-list",
-              "title": "面经 的大纲"
-            }
-          },
-          {
-            "id": "e03291b5679f5920",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "存档/临时.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "临时"
-            }
-          },
-          {
-            "id": "685a0dd439ae1e13",
+            "id": "95526c5a432b5e40",
             "type": "leaf",
             "state": {
               "type": "markdown",
@@ -66,11 +39,9 @@
               },
               "icon": "lucide-file",
               "title": "面经"
-            },
-            "group": "1ce8f4e6f62330f3"
+            }
           }
-        ],
-        "currentTab": 2
+        ]
       }
     ],
     "direction": "vertical"
@@ -224,28 +195,31 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "685a0dd439ae1e13",
+  "active": "95526c5a432b5e40",
   "lastOpenFiles": [
+    "tmp/springprog/src/test/java/x/y/SpringprogApplicationTests.java",
+    "tmp/springprog/src/main/java/x/y/SpringprogApplication.java",
+    "tmp/springprog/target/test-classes/x/y/SpringprogApplicationTests.class",
+    "tmp/springprog/target/classes/x/y/SpringprogApplication.class",
+    "tmp/springprog/src/test/java/x/y",
+    "tmp/springprog/src/main/java/x/y",
+    "tmp/springprog/target/test-classes/x/y",
+    "tmp/springprog/src/test/java/x",
+    "tmp/springprog/target/classes/x/y",
+    "tmp/springprog/src/main/resources/application.properties",
+    "tmp/springprog/src/main/resources/templates",
+    "tmp/springprog/HELP.md",
+    "存档/临时.md",
+    "就业/面经.md",
     "就业/assets/面经/file-20241209015929882.png",
     "就业/assets/面经/file-20241209015927867.png",
     "就业/assets/面经/file-20241209015852824.png",
     "就业/assets/面经/file-20241209015559500.png",
-    "存档/临时.md",
-    "就业/面经.md",
     "就业/assets/面经/file-20241203013858339.png",
-    "就业/assets/面经",
-    "就业/assets",
     "就业/测评.md",
     "就业/舔狗.assets/image-20221109105551889.png",
     "存档/assets/零碎/file-20241128154442151.png",
     "存档/零碎.md",
-    "存档/assets/零碎",
-    "存档/assets",
-    "存档",
-    "新建文件夹",
-    "push.bat",
-    "新建 TXT 文件.txt",
-    "pull.bat",
     "未命名.canvas",
     "临时.md",
     "零碎.md"
