@@ -6,7 +6,7 @@
       {
         "id": "0fdc2d3c24e80520",
         "type": "tabs",
-        "dimension": 19.25566343042071,
+        "dimension": 14.376321353065538,
         "children": [
           {
             "id": "29158a952e43fd28",
@@ -25,7 +25,7 @@
       {
         "id": "db9a8eef81c8d730",
         "type": "tabs",
-        "dimension": 80.74433656957929,
+        "dimension": 85.62367864693447,
         "children": [
           {
             "id": "95526c5a432b5e40",
@@ -197,17 +197,21 @@
   },
   "active": "95526c5a432b5e40",
   "lastOpenFiles": [
-    "tmp/springprog/src/test/java/x/y/SpringprogApplicationTests.java",
-    "tmp/springprog/src/main/java/x/y/SpringprogApplication.java",
-    "tmp/springprog/target/test-classes/x/y/SpringprogApplicationTests.class",
-    "tmp/springprog/target/classes/x/y/SpringprogApplication.class",
-    "tmp/springprog/src/test/java/x/y",
-    "tmp/springprog/src/main/java/x/y",
-    "tmp/springprog/target/test-classes/x/y",
-    "tmp/springprog/src/test/java/x",
-    "tmp/springprog/target/classes/x/y",
-    "tmp/springprog/src/main/resources/application.properties",
-    "tmp/springprog/src/main/resources/templates",
+    "就业/assets/面经/file-20241210024714663.png",
+    "tmp/gradleprog/build/tmp/compileJava/compileTransaction/stash-dir/GradleprogApplication.class.uniqueId0",
+    "tmp/gradleprog/src/main/java/x/y/GradleprogApplication.java~",
+    "tmp/gradleprog/build/classes/java/main/x/y/GradleprogApplication.class",
+    "tmp/gradleprog/build/tmp/compileJava/compileTransaction/stash-dir",
+    "tmp/gradleprog/build/tmp/compileJava/compileTransaction/backup-dir",
+    "tmp/gradleprog/build/tmp/compileJava/compileTransaction",
+    "就业/assets/面经/file-20241209204627185.png",
+    "tmp/gradleprog/build/resources/main/templates",
+    "tmp/gradleprog/build/resources/main/static",
+    "tmp/gradleprog/build/resources/main/application.properties",
+    "tmp/gradleprog/build/resources/main",
+    "tmp/gradleprog/HELP.md",
+    "tmp/demo1/HELP.md",
+    "tmp/demo/HELP.md",
     "tmp/springprog/HELP.md",
     "存档/临时.md",
     "就业/面经.md",
