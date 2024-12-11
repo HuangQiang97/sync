@@ -4,28 +4,9 @@
     "type": "split",
     "children": [
       {
-        "id": "0fdc2d3c24e80520",
-        "type": "tabs",
-        "dimension": 14.376321353065538,
-        "children": [
-          {
-            "id": "29158a952e43fd28",
-            "type": "leaf",
-            "state": {
-              "type": "outline",
-              "state": {
-                "file": "就业/面经.md"
-              },
-              "icon": "lucide-list",
-              "title": "面经 的大纲"
-            }
-          }
-        ]
-      },
-      {
         "id": "db9a8eef81c8d730",
         "type": "tabs",
-        "dimension": 85.62367864693447,
+        "dimension": 99.99999999999999,
         "children": [
           {
             "id": "95526c5a432b5e40",
