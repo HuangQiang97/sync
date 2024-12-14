@@ -4,8 +4,29 @@
     "type": "split",
     "children": [
       {
+        "id": "103e513a6a8b8d62",
+        "type": "tabs",
+        "dimension": 17.394366197183096,
+        "children": [
+          {
+            "id": "f282411bbb2add43",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "就业/面经.md"
+              },
+              "icon": "lucide-list",
+              "title": "面经 的大纲"
+            },
+            "group": "35ad70df5a47957c"
+          }
+        ]
+      },
+      {
         "id": "db9a8eef81c8d730",
         "type": "tabs",
+        "dimension": 82.6056338028169,
         "children": [
           {
             "id": "95526c5a432b5e40",
@@ -19,7 +40,8 @@
               },
               "icon": "lucide-file",
               "title": "面经"
-            }
+            },
+            "group": "35ad70df5a47957c"
           }
         ]
       }
@@ -177,6 +199,8 @@
   },
   "active": "95526c5a432b5e40",
   "lastOpenFiles": [
+    "就业/assets/面经/file-20241214180349160.png",
+    "就业/assets/面经/file-20241214180110568.png",
     "就业/assets/面经/file-20241210024714663.png",
     "tmp/gradleprog/build/tmp/compileJava/compileTransaction/stash-dir/GradleprogApplication.class.uniqueId0",
     "tmp/gradleprog/src/main/java/x/y/GradleprogApplication.java~",
