@@ -1,11 +1,10 @@
 {
-  "cssTheme": "Obsidian gruvbox",
-  "textFontFamily": "更纱黑体 SC,Times New Roman",
-  "monospaceFontFamily": "JetBrains Mono,更纱黑体 SC",
-  "interfaceFontFamily": "更纱黑体 SC,Times New Roman",
-  "enabledCssSnippets": [
-    "image"
-  ],
-  "baseFontSize": 15,
-  "accentColor": ""
+  "accentColor": "",
+  "theme": "obsidian",
+  "interfaceFontFamily": "微软雅黑",
+  "monospaceFontFamily": "JetBrainsMono NF",
+  "translucency": false,
+  "textFontFamily": "微软雅黑",
+  "baseFontSize": 17,
+  "cssTheme": ""
 }

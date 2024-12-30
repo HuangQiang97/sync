@@ -1,53 +1,50 @@
 {
   "main": {
-    "id": "89e55230aec86445",
+    "id": "0f057401b34c099e",
     "type": "split",
     "children": [
       {
-        "id": "db9a8eef81c8d730",
+        "id": "6334059d8015c3a2",
         "type": "tabs",
         "children": [
           {
-            "id": "95526c5a432b5e40",
+            "id": "6ba2c41b26d5d271",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "就业/面经.md",
+                "file": "面经.md",
                 "mode": "source",
                 "source": false
-              },
-              "icon": "lucide-file",
-              "title": "面经"
+              }
             }
           }
-        ]
+        ],
+        "stacked": true
       }
     ],
     "direction": "vertical"
   },
   "left": {
-    "id": "9d130fe1dcb9505e",
+    "id": "8cd10b18b9d8130e",
     "type": "split",
     "children": [
       {
-        "id": "dbbb49f6007088cf",
+        "id": "24780bae1978c263",
         "type": "tabs",
         "children": [
           {
-            "id": "66a66fce7ca38ef4",
+            "id": "5f1625c0ec4610ce",
             "type": "leaf",
             "state": {
               "type": "file-explorer",
               "state": {
                 "sortOrder": "alphabetical"
-              },
-              "icon": "lucide-folder-closed",
-              "title": "文件列表"
+              }
             }
           },
           {
-            "id": "fa23a81c979bc7ce",
+            "id": "ffdc8d2b6be3bace",
             "type": "leaf",
             "state": {
               "type": "search",
@@ -58,156 +55,116 @@
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical"
-              },
-              "icon": "lucide-search",
-              "title": "搜索"
+              }
             }
           },
           {
-            "id": "628eed7c8d631194",
+            "id": "bdce299d2775a373",
+            "type": "leaf",
+            "state": {
+              "type": "starred",
+              "state": {}
+            }
+          },
+          {
+            "id": "d55948ffc8f35b9a",
             "type": "leaf",
             "state": {
               "type": "bookmarks",
-              "state": {},
-              "icon": "lucide-bookmark",
-              "title": "书签"
+              "state": {}
             }
           }
         ]
       }
     ],
     "direction": "horizontal",
-    "width": 208.49999618530273,
-    "collapsed": true
+    "width": 200
   },
   "right": {
-    "id": "efb8d563e300ed7f",
+    "id": "33f1d982ed7ba845",
     "type": "split",
     "children": [
       {
-        "id": "73e343d69d3b7862",
+        "id": "b6a9414a44e1eb4d",
         "type": "tabs",
         "children": [
           {
-            "id": "2c01a86be8295a29",
+            "id": "fc8c554ac37d2fa6",
             "type": "leaf",
             "state": {
               "type": "backlink",
               "state": {
-                "file": "就业/面经.md",
+                "file": "面经.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
                 "showSearch": false,
                 "searchQuery": "",
                 "backlinkCollapsed": false,
-                "unlinkedCollapsed": true
-              },
-              "icon": "links-coming-in",
-              "title": "面经 的反向链接列表"
+                "unlinkedCollapsed": false
+              }
             }
           },
           {
-            "id": "d7d4f40bf087d926",
+            "id": "3d15098847cb6544",
             "type": "leaf",
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "就业/面经.md",
+                "file": "面经.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
-              },
-              "icon": "links-going-out",
-              "title": "面经 的出链列表"
+              }
             }
           },
           {
-            "id": "f1774736ee4fee40",
+            "id": "8bf4e7c7b4b952de",
             "type": "leaf",
             "state": {
               "type": "tag",
               "state": {
                 "sortOrder": "frequency",
                 "useHierarchy": true
-              },
-              "icon": "lucide-tags",
-              "title": "标签"
+              }
             }
           },
           {
-            "id": "8969f8c1a3b93936",
+            "id": "d0c5bc30935787d2",
             "type": "leaf",
             "state": {
               "type": "outline",
               "state": {
-                "file": "就业/面经.md"
-              },
-              "icon": "lucide-list",
-              "title": "面经 的大纲"
-            }
-          },
-          {
-            "id": "a5cacfe295b70f02",
-            "type": "leaf",
-            "state": {
-              "type": "git-view",
-              "state": {},
-              "icon": "git-pull-request",
-              "title": "Source Control"
+                "file": "面经.md"
+              }
             }
           }
-        ],
-        "currentTab": 1
+        ]
       }
     ],
     "direction": "horizontal",
-    "width": 200,
-    "collapsed": true
+    "width": 200
   },
   "left-ribbon": {
     "hiddenItems": {
-      "switcher:打开快速切换": false,
-      "graph:查看关系图谱": false,
-      "canvas:新建白板": false,
-      "daily-notes:打开/创建今天的日记": false,
-      "templates:插入模板": false,
-      "command-palette:打开命令面板": false,
-      "obsidian-git:Open Git source control": false
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "canvas:Create new canvas": false
     }
   },
-  "active": "95526c5a432b5e40",
+  "active": "fc8c554ac37d2fa6",
   "lastOpenFiles": [
-    "就业/assets/面经/file-20241221153218483.png",
-    "就业/assets/面经/file-20241221142849855.png",
-    "就业/assets/面经/file-20241214200438157.png",
-    "就业/assets/面经/file-20241214180349160.png",
-    "就业/assets/面经/file-20241214180110568.png",
-    "就业/assets/面经/file-20241210024714663.png",
-    "tmp/gradleprog/build/tmp/compileJava/compileTransaction/stash-dir/GradleprogApplication.class.uniqueId0",
-    "tmp/gradleprog/src/main/java/x/y/GradleprogApplication.java~",
-    "tmp/gradleprog/build/classes/java/main/x/y/GradleprogApplication.class",
-    "tmp/gradleprog/build/tmp/compileJava/compileTransaction/stash-dir",
-    "tmp/gradleprog/build/tmp/compileJava/compileTransaction/backup-dir",
-    "tmp/gradleprog/build/tmp/compileJava/compileTransaction",
-    "就业/assets/面经/file-20241209204627185.png",
-    "tmp/gradleprog/build/resources/main/templates",
-    "tmp/gradleprog/build/resources/main/static",
-    "tmp/gradleprog/build/resources/main/application.properties",
-    "tmp/gradleprog/build/resources/main",
-    "tmp/gradleprog/HELP.md",
-    "tmp/demo1/HELP.md",
-    "tmp/demo/HELP.md",
-    "tmp/springprog/HELP.md",
-    "存档/临时.md",
-    "就业/面经.md",
-    "就业/assets/面经/file-20241209015929882.png",
-    "就业/assets/面经/file-20241209015927867.png",
-    "就业/assets/面经/file-20241209015852824.png",
-    "就业/assets/面经/file-20241209015559500.png",
-    "就业/测评.md",
-    "存档/零碎.md",
-    "未命名.canvas",
-    "临时.md",
-    "零碎.md"
+    "面经.md",
+    "舔狗.md",
+    "Main.md",
+    "测评.md",
+    "笔试.md",
+    "未命名.md",
+    "面经.assets/0ece5d16ec1345a5b4dc2149cb5a8b40_tplv-k3u1fbpfcp-zoom-in-crop-mark_1304_0_0_0.webp",
+    "Pasted.md",
+    "Pasted image 20221129154303.png",
+    "Pasted image 20221129154053.png"
   ]
 }
